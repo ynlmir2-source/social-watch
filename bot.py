@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import aiohttp
 import discord
 from discord import app_commands
+from infra_manager import InfrastructureManager, InfrastructureError
 
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -399,6 +400,54 @@ async def socialwatch_rename_server(interaction: discord.Interaction, name: str)
         await interaction.followup.send(f"Discord couldn't rename the server: {error}", ephemeral=True)
 
 
+
+# Infrastructure operations are deliberately restricted to explicit admin actions.
+_infrastructure = InfrastructureManager.from_environment()
+
+
+@management_group.command(name="infrastructure", description="Manage connected hosting services")
+@app_commands.describe(
+    operation="Action to perform on configured non-database services",
+    confirm="Required for redeploy, restart, shutdown, and start operations",
+)
+@app_commands.choices(operation=[
+    app_commands.Choice(name="Status", value="status"),
+    app_commands.Choice(name="Deploy latest source", value="deploy"),
+    app_commands.Choice(name="Redeploy current build", value="redeploy"),
+    app_commands.Choice(name="Restart services", value="restart"),
+    app_commands.Choice(name="Shutdown services", value="shutdown"),
+    app_commands.Choice(name="Start / open services", value="start"),
+])
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.check(is_authorized_admin)
+async def socialwatch_infrastructure(
+    interaction: discord.Interaction,
+    operation: app_commands.Choice[str],
+    confirm: bool = False,
+):
+    action = operation.value
+    if action != "status" and not confirm:
+        return await management_denied(
+            interaction,
+            "Safety check: set **confirm = True** to run this infrastructure action. "
+            "Only explicitly configured managed service IDs are affected; databases are not included automatically.",
+        )
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        result = await _infrastructure.run(action)
+        await interaction.followup.send(result[:1900], ephemeral=True)
+    except InfrastructureError as error:
+        await interaction.followup.send(f"Infrastructure action not completed: {error}"[:1900], ephemeral=True)
+    except Exception as error:
+        print(f"Infrastructure action failed ({action}): {type(error).__name__}")
+        await interaction.followup.send(
+            "Infrastructure action failed. Check the Social Watch logs; no success is being assumed.",
+            ephemeral=True,
+        )
+
+
+
 tree.add_command(management_group)
 
 
@@ -469,7 +518,7 @@ async def refresh_dashboard_config():
                 if priority not in {"normal", "medium", "high"}:
                     priority = "normal"
                 action = str(rule.get("action", "discord_nest")).lower()
-                if action not in {"record_only", "discord", "nest", "discord_nest"}:
+                if action not in {"record_only", "discord", "nest", "discord_nest", "redeploy"}:
                     action = "discord_nest"
                 match_mode = str(rule.get("matchMode", "contains")).lower()
                 if match_mode not in {"contains", "whole_word"}:
@@ -786,6 +835,22 @@ async def on_message(message):
     actions = {rule.get("action", "discord_nest") for rule in matches}
     send_discord = bool(actions.intersection({"discord", "discord_nest"}))
     send_nest = bool(actions.intersection({"nest", "discord_nest"}))
+
+    # Infrastructure keywords never act on ordinary monitored messages.
+    # The redeploy phrase requires both an allowlisted admin and an exact confirmation.
+    if "redeploy" in actions:
+        admin_confirmed = (
+            str(message.author.id) in ADMIN_USER_IDS
+            and content.strip() == "project update confirm redeploy"
+        )
+        if admin_confirmed:
+            try:
+                result = await _infrastructure.run("redeploy")
+                print("Admin-confirmed keyword redeployment completed: " + result)
+            except InfrastructureError as error:
+                print("Admin-confirmed keyword redeployment failed: " + str(error))
+        else:
+            print("Redeploy keyword matched; ignored because admin confirmation phrase was not exact.")
 
     # Discord channel delivery is controlled both by each rule and the global switch.
     if send_discord and AUTOMATION_SETTINGS.get("discordChannelAlertsEnabled", True):
