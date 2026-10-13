@@ -915,4 +915,51 @@ async def on_message(message):
         print("Matched keyword action does not include Google Nest delivery.")
 
 
+@management_group.command(name="rebuild", description="Create the new Social Watch server layout")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_channels=True, manage_guild=True)
+@app_commands.check(is_authorized_admin)
+async def socialwatch_rebuild(interaction: discord.Interaction):
+    guild = interaction.guild
+    if guild is None:
+        return await management_denied(interaction, "Use this command inside your server.")
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    layout = {
+        "▰ COMMAND CENTER": ["welcome", "announcements", "system-status"],
+        "▰ SOCIAL MONITORING": ["live-alerts", "social-feed", "keyword-matches"],
+        "▰ AUTOMATION": ["bot-commands", "automation-settings", "integration-status"],
+        "▰ SYSTEM LOGS": ["event-logs", "error-logs", "audit-log"],
+    }
+    made_categories = 0
+    made_channels = 0
+    issues = []
+    for category_name, channel_names in layout.items():
+        category = discord.utils.get(guild.categories, name=category_name)
+        if category is None:
+            try:
+                category = await guild.create_category(category_name, reason="Social Watch server rebuild")
+                made_categories += 1
+            except discord.HTTPException as error:
+                issues.append(f"{category_name}: {type(error).__name__}")
+                continue
+        for channel_name in channel_names:
+            if discord.utils.find(lambda ch: ch.name == channel_name and ch.category_id == category.id, guild.text_channels):
+                continue
+            try:
+                await guild.create_text_channel(channel_name, category=category, reason="Social Watch server rebuild")
+                made_channels += 1
+            except discord.HTTPException as error:
+                issues.append(f"{channel_name}: {type(error).__name__}")
+    for role_name, color_value in [("Owner", 0x39FF14), ("Administrator", 0x20D840), ("Moderator", 0x168A32), ("Automation", 0x526B58), ("Member", 0x252B27)]:
+        if discord.utils.get(guild.roles, name=role_name) is None:
+            try:
+                await guild.create_role(name=role_name, colour=discord.Colour(color_value), reason="Social Watch server rebuild")
+            except discord.HTTPException as error:
+                issues.append(f"Role {role_name}: {type(error).__name__}")
+    result = f"Social Watch rebuild finished. Categories: {made_categories}; channels: {made_channels}. Nothing existing was deleted or renamed."
+    if issues:
+        result += "\nIssues: " + "; ".join(issues[:6])
+    await interaction.followup.send(result[:1900], ephemeral=True)
+
+
 client.run(TOKEN)
