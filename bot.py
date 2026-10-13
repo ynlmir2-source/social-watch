@@ -126,3 +126,48 @@ async def on_message(message):
 
 
 client.run(TOKEN)
+import os
+import aiohttp
+
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "").rstrip("/")
+DASHBOARD_INGEST_KEY = os.getenv("DASHBOARD_INGEST_KEY", "")
+
+
+async def send_dashboard_alert(
+    message,
+    source="Discord",
+    priority="normal",
+    keyword=None,
+):
+    if not DASHBOARD_URL or not DASHBOARD_INGEST_KEY:
+        print("Dashboard integration variables are missing.")
+        return False
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{DASHBOARD_URL}/api/alerts",
+                headers={
+                    "Authorization": f"Bearer {DASHBOARD_INGEST_KEY}"
+                },
+                json={
+                    "message": str(message)[:10000],
+                    "source": str(source)[:150],
+                    "priority": priority,
+                    "keyword": keyword,
+                },
+            ) as response:
+                if response.status == 201:
+                    print("Social Watch alert forwarded successfully.")
+                    return True
+
+                print(
+                    f"Dashboard alert failed: HTTP {response.status}"
+                )
+                return False
+
+    except Exception as error:
+        print(f"Dashboard forwarding error: {type(error).__name__}")
+        return False
