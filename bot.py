@@ -9,6 +9,9 @@ TOKEN = os.environ.get("DISCORD_TOKEN")
 ALERT_CHANNEL_ID = os.environ.get("ALERT_CHANNEL_ID", "").strip()
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "").strip().rstrip("/")
 DASHBOARD_INGEST_KEY = os.environ.get("DASHBOARD_INGEST_KEY", "").strip()
+HOME_ASSISTANT_WEBHOOK_URL = os.environ.get(
+    "HOME_ASSISTANT_WEBHOOK_URL", ""
+).strip()
 
 KEYWORDS = [
     word.strip().lower()
@@ -39,15 +42,20 @@ async def on_ready():
     print(f"Social Watch is online as {client.user}")
 
     if DASHBOARD_URL and DASHBOARD_INGEST_KEY:
-        if DASHBOARD_URL.startswith("https://"):
-            print("Dashboard forwarding is configured.")
-        else:
-            print("Dashboard forwarding is disabled: DASHBOARD_URL must use HTTPS.")
+        print("Dashboard forwarding is configured.")
     else:
-        print(
-            "Dashboard forwarding is not configured. "
-            "Set DASHBOARD_URL and DASHBOARD_INGEST_KEY in Railway."
-        )
+        print("Dashboard forwarding is not configured yet.")
+
+    if HOME_ASSISTANT_WEBHOOK_URL:
+        if HOME_ASSISTANT_WEBHOOK_URL.startswith("https://"):
+            print("Home Assistant webhook forwarding is configured.")
+        else:
+            print(
+                "Home Assistant webhook is set but must use HTTPS. "
+                "Forwarding to Home Assistant is disabled."
+            )
+    else:
+        print("Home Assistant webhook is not configured yet.")
 
 
 def get_priority(matches):
@@ -73,7 +81,9 @@ async def forward_to_dashboard(keyword_matches, discord_message):
         return False
 
     guild_name = discord_message.guild.name
-    channel_name = getattr(discord_message.channel, "name", str(discord_message.channel))
+    channel_name = getattr(
+        discord_message.channel, "name", str(discord_message.channel)
+    )
     author_name = str(discord_message.author)
     matched_keywords = ", ".join(keyword_matches)
 
@@ -127,6 +137,64 @@ async def forward_to_dashboard(keyword_matches, discord_message):
         return False
 
 
+async def forward_to_home_assistant(keyword_matches, discord_message):
+    """POST a concise alert to Home Assistant's private webhook URL."""
+    if not HOME_ASSISTANT_WEBHOOK_URL:
+        return False
+
+    if not HOME_ASSISTANT_WEBHOOK_URL.startswith("https://"):
+        print("Home Assistant webhook skipped: URL must use HTTPS.")
+        return False
+
+    guild_name = discord_message.guild.name
+    channel_name = getattr(
+        discord_message.channel, "name", str(discord_message.channel)
+    )
+    matched_keywords = ", ".join(keyword_matches)
+    priority = get_priority(keyword_matches)
+
+    spoken_message = (
+        f"Social Watch alert. Server {guild_name}, channel {channel_name}. "
+        f"Matched keywords: {matched_keywords}. "
+        f"Message: {discord_message.content[:500]}"
+    )
+
+    payload = {
+        "message": spoken_message[:900],
+        "source": f"Discord: {guild_name} / #{channel_name}"[:150],
+        "priority": priority,
+        "keyword": matched_keywords[:150],
+    }
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                HOME_ASSISTANT_WEBHOOK_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            ) as response:
+                if 200 <= response.status < 300:
+                    print(
+                        "Home Assistant webhook accepted alert. "
+                        f"Priority: {priority} | Keywords: {matched_keywords}"
+                    )
+                    return True
+
+                print(
+                    f"Home Assistant webhook failed with HTTP {response.status}."
+                )
+                return False
+
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        print(
+            "Could not forward alert to Home Assistant: "
+            f"{type(error).__name__}"
+        )
+        return False
+
+
 @client.event
 async def on_message(message):
     # Only monitor messages in servers, and never react to bot messages.
@@ -177,8 +245,9 @@ async def on_message(message):
         except discord.DiscordException as error:
             print(f"Could not send alert to Discord: {error}")
 
-    # Forward once per matched message, including all matches and context.
+    # Keep the dashboard integration and add the optional Nest Hub route.
     await forward_to_dashboard(matches, message)
+    await forward_to_home_assistant(matches, message)
 
 
 client.run(TOKEN)
