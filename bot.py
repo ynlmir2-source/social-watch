@@ -760,7 +760,7 @@ async def on_message(message):
         term = rule["term"]
         mode = rule.get("matchMode", "contains")
         if mode == "whole_word":
-            matched = re.search(r"(?<!\\w)" + re.escape(term) + r"(?!\\w)", content) is not None
+            matched = re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", content) is not None
         else:
             matched = term in content
         if not matched:
