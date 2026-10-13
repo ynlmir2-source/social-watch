@@ -21,10 +21,18 @@ async def on_ready():
     print(f"Social Watch is online as {client.user}")
 
 
+
 @client.event
 async def on_message(message):
+    print(
+        f"Message event received | "
+        f"Channel: {message.channel} | "
+        f"Content: {message.content!r}"
+    )
+
     if message.author.bot:
         return
+
 
     content = message.content.lower()
     matches = [word for word in KEYWORDS if word in content]
