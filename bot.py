@@ -823,7 +823,7 @@ async def on_message(message):
         term = rule["term"]
         mode = rule.get("matchMode", "contains")
         if mode == "whole_word":
-            matched = re.search(r"(?<!\\w)" + re.escape(term) + r"(?!\\w)", content) is not None
+            matched = re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", content) is not None
         else:
             matched = term in content
         if not matched:
@@ -886,12 +886,12 @@ async def on_message(message):
             discord_terms = ", ".join(rule["term"] for rule in discord_matches)
             discord_priority = get_priority(discord_matches)
             alert = (
-                "**Social Watch Alert**\\n"
-                f"**Priority:** {discord_priority.upper()}\\n"
-                f"**Server:** {message.guild.name}\\n"
-                f"**Channel:** #{channel_name}\\n"
-                f"**Author:** {message.author}\\n"
-                f"**Matched keywords:** {discord_terms}\\n"
+                "**Social Watch Alert**\n"
+                f"**Priority:** {discord_priority.upper()}\n"
+                f"**Server:** {message.guild.name}\n"
+                f"**Channel:** #{channel_name}\n"
+                f"**Author:** {message.author}\n"
+                f"**Matched keywords:** {discord_terms}\n"
                 f"**Message:** {message.content[:1200]}"
             )
             try:
