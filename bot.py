@@ -1,26 +1,31 @@
-
+import asyncio
 import os
-import discord
+
 import aiohttp
+import discord
+
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
-ALERT_CHANNEL_ID = os.environ.get("ALERT_CHANNEL_ID")
-DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "").rstrip("/")
-DASHBOARD_INGEST_KEY = os.environ.get("DASHBOARD_INGEST_KEY", "")
+ALERT_CHANNEL_ID = os.environ.get("ALERT_CHANNEL_ID", "").strip()
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "").strip().rstrip("/")
+DASHBOARD_INGEST_KEY = os.environ.get("DASHBOARD_INGEST_KEY", "").strip()
 
 KEYWORDS = [
     word.strip().lower()
     for word in os.environ.get(
         "WATCH_KEYWORDS",
-        "social watch, project update, event announcement, urgent, launch, settings, owner info"
+        "social watch, project update, event announcement, urgent, launch, settings, owner info",
     ).split(",")
     if word.strip()
 ]
 
+HIGH_PRIORITY_KEYWORDS = {"urgent", "emergency", "critical", "immediate"}
+MEDIUM_PRIORITY_KEYWORDS = {"announcement", "important", "warning"}
+
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
 
-if not ALERT_CHANNEL_ID or not ALERT_CHANNEL_ID.isdigit():
+if not ALERT_CHANNEL_ID.isdigit():
     raise RuntimeError("ALERT_CHANNEL_ID is missing or invalid")
 
 intents = discord.Intents.default()
@@ -34,24 +39,63 @@ async def on_ready():
     print(f"Social Watch is online as {client.user}")
 
     if DASHBOARD_URL and DASHBOARD_INGEST_KEY:
-        print("Dashboard forwarding is configured.")
+        if DASHBOARD_URL.startswith("https://"):
+            print("Dashboard forwarding is configured.")
+        else:
+            print("Dashboard forwarding is disabled: DASHBOARD_URL must use HTTPS.")
     else:
-        print("Dashboard forwarding is not configured yet.")
+        print(
+            "Dashboard forwarding is not configured. "
+            "Set DASHBOARD_URL and DASHBOARD_INGEST_KEY in Railway."
+        )
 
 
-async def forward_to_dashboard(keyword, message):
+def get_priority(matches):
+    matched = set(matches)
+
+    if matched & HIGH_PRIORITY_KEYWORDS:
+        return "high"
+
+    if matched & MEDIUM_PRIORITY_KEYWORDS:
+        return "medium"
+
+    return "normal"
+
+
+async def forward_to_dashboard(keyword_matches, discord_message):
+    """Send one complete alert per matching Discord message to the dashboard."""
     if not DASHBOARD_URL or not DASHBOARD_INGEST_KEY:
-        return
+        print("Dashboard alert skipped: forwarding variables are missing.")
+        return False
+
+    if not DASHBOARD_URL.startswith("https://"):
+        print("Dashboard alert skipped: DASHBOARD_URL must use HTTPS.")
+        return False
+
+    guild_name = discord_message.guild.name
+    channel_name = getattr(discord_message.channel, "name", str(discord_message.channel))
+    author_name = str(discord_message.author)
+    matched_keywords = ", ".join(keyword_matches)
+
+    dashboard_message = (
+        f"Server: {guild_name}\n"
+        f"Channel: #{channel_name}\n"
+        f"Author: {author_name}\n"
+        f"Matched keywords: {matched_keywords}\n"
+        f"Message: {discord_message.content[:8500]}\n"
+        f"Discord link: {discord_message.jump_url}"
+    )
 
     payload = {
-        "keyword": keyword,
-        "message": message.content[:1500],
-        "server": message.guild.name,
-        "channel": str(message.channel)
+        "message": dashboard_message[:10000],
+        "source": f"Discord: {guild_name} / #{channel_name}"[:150],
+        "priority": get_priority(keyword_matches),
+        "keyword": matched_keywords[:150],
     }
 
     headers = {
-        "Authorization": f"Bearer {DASHBOARD_INGEST_KEY}"
+        "Authorization": f"Bearer {DASHBOARD_INGEST_KEY}",
+        "Content-Type": "application/json",
     }
 
     try:
@@ -61,27 +105,38 @@ async def forward_to_dashboard(keyword, message):
             async with session.post(
                 f"{DASHBOARD_URL}/api/alerts",
                 json=payload,
-                headers=headers
+                headers=headers,
             ) as response:
                 if response.status == 201:
-                    print(f"Dashboard alert sent: {keyword}")
-                else:
                     print(
-                        f"Dashboard returned HTTP {response.status}: "
-                        f"{await response.text()}"
+                        "Dashboard alert saved. "
+                        f"Source: {payload['source']} | "
+                        f"Keywords: {matched_keywords}"
                     )
+                    return True
 
-    except (aiohttp.ClientError, TimeoutError) as error:
-        print(f"Could not forward alert to dashboard: {error}")
+                response_detail = (await response.text())[:300]
+                print(
+                    f"Dashboard alert failed with HTTP {response.status}: "
+                    f"{response_detail}"
+                )
+                return False
+
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        print(f"Could not forward alert to dashboard: {type(error).__name__}")
+        return False
 
 
 @client.event
 async def on_message(message):
-    if message.author.bot or not message.guild:
+    # Only monitor messages in servers, and never react to bot messages.
+    if message.author.bot or message.guild is None:
         return
 
     content = message.content.lower()
-    matches = [word for word in KEYWORDS if word in content]
+    matches = list(dict.fromkeys(
+        keyword for keyword in KEYWORDS if keyword in content
+    ))
 
     if not matches:
         return
@@ -92,82 +147,38 @@ async def on_message(message):
         f"| Matches: {', '.join(matches)}"
     )
 
+    # Send the alert to the configured Discord alert channel.
     alert_channel = client.get_channel(int(ALERT_CHANNEL_ID))
 
     if alert_channel is None:
         try:
-            alert_channel = await client.fetch_channel(
-                int(ALERT_CHANNEL_ID)
-            )
+            alert_channel = await client.fetch_channel(int(ALERT_CHANNEL_ID))
         except discord.HTTPException as error:
-            print(f"Could not find alert channel: {error}")
-            return
+            # Keep going: the dashboard should still receive the alert.
+            print(f"Could not find Discord alert channel: {error}")
 
-    alert = (
-        f"**Social Watch Alert**\n"
-        f"**Server:** {message.guild.name}\n"
-        f"**Channel:** #{message.channel.name}\n"
-        f"**Author:** {message.author}\n"
-        f"**Matched keywords:** {', '.join(matches)}\n"
-        f"**Message:** {message.content[:1200]}"
-    )
-
-    try:
-        await alert_channel.send(
-            alert,
-            allowed_mentions=discord.AllowedMentions.none()
+    if alert_channel is not None:
+        channel_name = getattr(message.channel, "name", str(message.channel))
+        alert = (
+            "**Social Watch Alert**\n"
+            f"**Server:** {message.guild.name}\n"
+            f"**Channel:** #{channel_name}\n"
+            f"**Author:** {message.author}\n"
+            f"**Matched keywords:** {', '.join(matches)}\n"
+            f"**Message:** {message.content[:1200]}"
         )
-        print("Alert sent to Discord.")
-    except discord.HTTPException as error:
-        print(f"Could not send alert: {error}")
 
-    for keyword in matches:
-        await forward_to_dashboard(keyword, message)
+        try:
+            await alert_channel.send(
+                alert,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            print("Alert sent to Discord.")
+        except discord.DiscordException as error:
+            print(f"Could not send alert to Discord: {error}")
+
+    # Forward once per matched message, including all matches and context.
+    await forward_to_dashboard(matches, message)
 
 
 client.run(TOKEN)
-import os
-import aiohttp
-
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", "").rstrip("/")
-DASHBOARD_INGEST_KEY = os.getenv("DASHBOARD_INGEST_KEY", "")
-
-
-async def send_dashboard_alert(
-    message,
-    source="Discord",
-    priority="normal",
-    keyword=None,
-):
-    if not DASHBOARD_URL or not DASHBOARD_INGEST_KEY:
-        print("Dashboard integration variables are missing.")
-        return False
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=10)
-
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                f"{DASHBOARD_URL}/api/alerts",
-                headers={
-                    "Authorization": f"Bearer {DASHBOARD_INGEST_KEY}"
-                },
-                json={
-                    "message": str(message)[:10000],
-                    "source": str(source)[:150],
-                    "priority": priority,
-                    "keyword": keyword,
-                },
-            ) as response:
-                if response.status == 201:
-                    print("Social Watch alert forwarded successfully.")
-                    return True
-
-                print(
-                    f"Dashboard alert failed: HTTP {response.status}"
-                )
-                return False
-
-    except Exception as error:
-        print(f"Dashboard forwarding error: {type(error).__name__}")
-        return False
