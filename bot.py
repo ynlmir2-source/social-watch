@@ -143,8 +143,14 @@ def print(*args, **kwargs):
 class _DiscordLogHandler(logging.Handler):
     def emit(self, record):
         try:
+            # Never forward discord.py's own HTTP/rate-limit logs back to Discord.
+            # Doing so can create a feedback loop when the log channel is throttled.
+            if record.name == "discord.http" or record.name.startswith("discord.http."):
+                return
             message = self.format(record)
             if not client.is_ready():
+                return
+            if "rate limited" in message.lower() or "responded with 429" in message.lower():
                 return
             level = _classify_log(message, record.levelname)
             asyncio.get_running_loop().create_task(_publish_log(message, level, "python-discord"))
@@ -751,8 +757,10 @@ async def _ensure_channel_panels(guild):
                 except discord.DiscordException as error:
                     print("Could not pin panel in #" + channel_name + ": " + type(error).__name__)
                 created += 1
+                # Avoid burst-posting panels into 12 channels at startup.
+                await asyncio.sleep(2)
             except discord.DiscordException as error:
-                print("Panel creation failed in #" + channel_name + ": " + type(error).__name__)
+                builtins.print("Panel creation failed in #" + channel_name + ": " + type(error).__name__)
         else:
             try:
                 await existing.edit(view=view)
