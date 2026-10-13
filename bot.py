@@ -468,7 +468,22 @@ async def refresh_dashboard_config():
                 priority = str(rule.get("priority", "normal")).lower()
                 if priority not in {"normal", "medium", "high"}:
                     priority = "normal"
-                clean_rules.append({"term": term, "priority": priority})
+                action = str(rule.get("action", "discord_nest")).lower()
+                if action not in {"record_only", "discord", "nest", "discord_nest"}:
+                    action = "discord_nest"
+                match_mode = str(rule.get("matchMode", "contains")).lower()
+                if match_mode not in {"contains", "whole_word"}:
+                    match_mode = "contains"
+                exclude = rule.get("exclude", [])
+                if not isinstance(exclude, list):
+                    exclude = []
+                clean_rules.append({
+                    "term": term,
+                    "priority": priority,
+                    "action": action,
+                    "matchMode": match_mode,
+                    "exclude": [str(item).strip().lower()[:80] for item in exclude[:20] if str(item).strip()],
+                })
             KEYWORD_RULES = clean_rules
 
         if isinstance(remote_automations, dict):
@@ -740,10 +755,20 @@ async def on_message(message):
         return
 
     content = message.content.lower()
-    matches = [
-        rule for rule in KEYWORD_RULES
-        if rule["term"] in content
-    ]
+
+    def matches_rule(rule):
+        term = rule["term"]
+        mode = rule.get("matchMode", "contains")
+        if mode == "whole_word":
+            matched = re.search(r"(?<!\\w)" + re.escape(term) + r"(?!\\w)", content) is not None
+        else:
+            matched = term in content
+        if not matched:
+            return False
+        excluded = rule.get("exclude", [])
+        return not any(item and item in content for item in excluded)
+
+    matches = [rule for rule in KEYWORD_RULES if matches_rule(rule)]
     if not matches:
         return
 
@@ -757,8 +782,13 @@ async def on_message(message):
         f"| Matches: {', '.join(matched_terms)}"
     )
 
-    # Discord channel delivery is controlled from the dashboard.
-    if AUTOMATION_SETTINGS.get("discordChannelAlertsEnabled", True):
+    # Each matching keyword selects its own destinations. Global switches still apply.
+    actions = {rule.get("action", "discord_nest") for rule in matches}
+    send_discord = bool(actions.intersection({"discord", "discord_nest"}))
+    send_nest = bool(actions.intersection({"nest", "discord_nest"}))
+
+    # Discord channel delivery is controlled both by each rule and the global switch.
+    if send_discord and AUTOMATION_SETTINGS.get("discordChannelAlertsEnabled", True):
         alert_channel = client.get_channel(int(ALERT_CHANNEL_ID))
         if alert_channel is None:
             try:
@@ -786,12 +816,17 @@ async def on_message(message):
                 print("Alert sent to Discord.")
             except discord.DiscordException as error:
                 print(f"Could not send alert to Discord: {error}")
+    elif not send_discord:
+        print("Matched keyword action does not include Discord delivery.")
     else:
         print("Discord channel notifications are disabled in dashboard settings.")
 
-    # Store the alert regardless of whether any announcement is suppressed.
+    # Always retain matching events in dashboard history for audit and filtering.
     await forward_to_dashboard(matches, message, priority)
-    await forward_to_home_assistant(matches, message, priority)
+    if send_nest:
+        await forward_to_home_assistant(matches, message, priority)
+    else:
+        print("Matched keyword action does not include Google Nest delivery.")
 
 
 client.run(TOKEN)
