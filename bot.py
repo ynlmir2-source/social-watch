@@ -1,5 +1,8 @@
 import asyncio
+import builtins
+import logging
 import os
+import re
 from datetime import datetime, time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -61,6 +64,157 @@ if not ALERT_CHANNEL_ID.isdigit():
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+
+LOG_CHANNEL_NAME = "social-watch-logs"
+STATUS_CHANNEL_SUFFIX = "・system-status"
+_LOG_CHANNEL = None
+_STATUS_CHANNELS = {}
+_LAST_LOG_ERROR_AT = 0.0
+
+def _classify_log(message, explicit_level=None):
+    text = str(message).lower()
+    if explicit_level:
+        level = str(explicit_level).lower()
+        return level if level in {"debug", "info", "warning", "error", "critical"} else "info"
+    if any(word in text for word in ("critical", "traceback", "exception", "failed", "failure", "error", "could not", "unavailable", "denied")):
+        return "error"
+    if "warning" in text or "warn" in text:
+        return "warning"
+    if "debug" in text:
+        return "debug"
+    return "info"
+
+def _safe_log_text(value):
+    text = str(value).replace("\x00", "")[:9000]
+    text = re.sub(r"(?:mfa\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{20,})", "[REDACTED_TOKEN]", text)
+    text = re.sub(r"(Bearer\s+)[^\s'\"]+", r"\1[REDACTED]", text, flags=re.IGNORECASE)
+    text = re.sub(r"(https://[^\s/]+/api/webhooks/)[^\s]+", r"\1[REDACTED]", text, flags=re.IGNORECASE)
+    return text
+
+async def _post_log_to_dashboard(level, message, source="social-watch-bot"):
+    if not DASHBOARD_URL.startswith("https://") or not DASHBOARD_INGEST_KEY:
+        return
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{DASHBOARD_URL}/api/logs",
+                headers={"Authorization": f"Bearer {DASHBOARD_INGEST_KEY}"},
+                json={"level": level, "source": source, "message": message},
+            ) as response:
+                if response.status >= 300:
+                    builtins.print(f"Log forwarding failed: dashboard returned HTTP {response.status}")
+    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+        builtins.print(f"Log forwarding unavailable: {type(error).__name__}")
+
+async def _publish_log(message, level="info", source="social-watch-bot"):
+    safe_message = _safe_log_text(message)
+    if not safe_message:
+        return
+    global _LAST_LOG_ERROR_AT
+    if level in {"warning", "error", "critical"}:
+        _LAST_LOG_ERROR_AT = asyncio.get_running_loop().time()
+        asyncio.create_task(_update_status_channels())
+    await _post_log_to_dashboard(level, safe_message, source)
+    channel = _LOG_CHANNEL
+    if channel is not None:
+        label = {"debug": "DEBUG", "info": "INFO", "warning": "WARNING", "error": "ERROR", "critical": "CRITICAL"}.get(level, "INFO")
+        try:
+            await channel.send(
+                f"**{label}** · {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}\n{safe_message[:1850]}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (discord.DiscordException, RuntimeError) as error:
+            builtins.print(f"Discord log-channel delivery failed: {type(error).__name__}")
+
+def print(*args, **kwargs):
+    """Keep Railway stdout intact while mirroring explicit app logs to the log center."""
+    builtins.print(*args, **kwargs)
+    try:
+        message = " ".join(str(arg) for arg in args)
+        if not message or not client.is_ready():
+            return
+        level = _classify_log(message)
+        asyncio.get_running_loop().create_task(_publish_log(message, level))
+    except RuntimeError:
+        pass
+
+class _DiscordLogHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            message = self.format(record)
+            if not client.is_ready():
+                return
+            level = _classify_log(message, record.levelname)
+            asyncio.get_running_loop().create_task(_publish_log(message, level, "python-discord"))
+        except Exception:
+            pass
+
+logging.getLogger().setLevel(logging.INFO)
+_log_handler = _DiscordLogHandler()
+_log_handler.setLevel(logging.WARNING)
+_log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+logging.getLogger().addHandler(_log_handler)
+
+async def _ensure_control_channels():
+    global _LOG_CHANNEL
+    if not client.guilds:
+        return
+    guild = client.get_guild(int(MANAGEMENT_GUILD_ID)) if MANAGEMENT_GUILD_ID.isdigit() else None
+    if guild is None:
+        guild = client.guilds[0]
+    existing_log = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
+    if existing_log is None and bot_has_guild_permission(guild, "manage_channels"):
+        overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
+        if guild.me:
+            overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, embed_links=True)
+        for user_id in ADMIN_USER_IDS:
+            member = guild.get_member(int(user_id))
+            if member:
+                overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        try:
+            existing_log = await guild.create_text_channel(LOG_CHANNEL_NAME, overwrites=overwrites, reason="Social Watch central log channel", topic="Private system logs from Social Watch bot and integrations.")
+        except discord.DiscordException as error:
+            builtins.print(f"Could not create the Social Watch log channel: {type(error).__name__}")
+    _LOG_CHANNEL = existing_log
+    for server in client.guilds:
+        status_channel = next((channel for channel in server.voice_channels if channel.name.endswith(STATUS_CHANNEL_SUFFIX)), None)
+        if status_channel is None and bot_has_guild_permission(server, "manage_channels"):
+            try:
+                status_channel = await server.create_voice_channel("🟢" + STATUS_CHANNEL_SUFFIX, reason="Social Watch live service status", user_limit=0)
+            except discord.DiscordException as error:
+                builtins.print(f"Could not create status voice channel in {server.name}: {type(error).__name__}")
+        if status_channel is not None:
+            _STATUS_CHANNELS[server.id] = status_channel
+    await _update_status_channels()
+
+async def _update_status_channels():
+    if not _STATUS_CHANNELS:
+        return
+    loop = asyncio.get_running_loop()
+    recent_error = bool(_LAST_LOG_ERROR_AT and loop.time() - _LAST_LOG_ERROR_AT < 600)
+    dashboard_ok = False
+    if DASHBOARD_URL.startswith("https://") and DASHBOARD_INGEST_KEY:
+        try:
+            timeout = aiohttp.ClientTimeout(total=4)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{DASHBOARD_URL}/health") as response:
+                    dashboard_ok = response.status == 200
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            dashboard_ok = False
+    configured = bool(DASHBOARD_URL and DASHBOARD_INGEST_KEY)
+    healthy = client.is_ready() and (dashboard_ok or not configured) and not recent_error
+    emoji = "🟢" if healthy else "🟠"
+    for guild_id, channel in list(_STATUS_CHANNELS.items()):
+        if channel.guild is None:
+            continue
+        wanted = emoji + STATUS_CHANNEL_SUFFIX
+        if channel.name != wanted:
+            try:
+                await channel.edit(name=wanted, reason="Refresh Social Watch health indicator")
+            except discord.DiscordException as error:
+                builtins.print(f"Could not update status channel in {channel.guild.name}: {type(error).__name__}")
+
 
 tree = app_commands.CommandTree(client)
 management_group = app_commands.Group(
@@ -368,6 +522,7 @@ async def config_sync_loop():
     while not client.is_closed():
         await refresh_dashboard_config()
         await post_integration_heartbeat("discord_bot", "connected")
+        await _update_status_channels()
         await asyncio.sleep(60)
 
 
@@ -376,6 +531,7 @@ async def on_ready():
     global _CONFIG_SYNC_TASK
 
     print(f"Social Watch is online as {client.user}")
+    await _ensure_control_channels()
 
     try:
         if MANAGEMENT_GUILD_ID.isdigit():
