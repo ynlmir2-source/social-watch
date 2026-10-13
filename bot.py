@@ -572,6 +572,7 @@ async def on_ready():
 
     if HOME_ASSISTANT_WEBHOOK_URL.startswith("https://"):
         print("Home Assistant webhook forwarding is configured.")
+        await post_integration_heartbeat("home_assistant", "configured")
     elif HOME_ASSISTANT_WEBHOOK_URL:
         print("Home Assistant webhook is set but must use HTTPS; forwarding is disabled.")
     else:
