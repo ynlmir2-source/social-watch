@@ -2,7 +2,7 @@
 import os
 import discord
 
-TOKEN = os.environ.get("MTU1OTU3Mjc3NjU4NTUyNzQyNw.GJSu5E.5yYJTec17_UkiBy0NFOe_ELzxuO3NI5oS4bcZc")
+TOKEN = os.environ.get("DISCORD_TOKEN")
 
 KEYWORDS = [
     word.strip().lower()
