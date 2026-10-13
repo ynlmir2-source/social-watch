@@ -606,12 +606,99 @@ async def on_disconnect():
     await _update_status_channels()
 
 
+async def _apply_server_layout(guild):
+    """Idempotently add the Social Watch layout without deleting existing server assets."""
+    layout = {
+        "▰ COMMAND CENTER": ["welcome", "announcements", "system-status"],
+        "▰ SOCIAL MONITORING": ["live-alerts", "social-feed", "keyword-matches"],
+        "▰ AUTOMATION": ["bot-commands", "automation-settings", "integration-status"],
+        "▰ SYSTEM LOGS": ["event-logs", "error-logs", "audit-log"],
+    }
+    made_categories = 0
+    made_channels = 0
+    issues = []
+    for category_name, channel_names in layout.items():
+        category = discord.utils.get(guild.categories, name=category_name)
+        if category is None:
+            overwrites = None
+            if category_name == "▰ SYSTEM LOGS":
+                overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
+                if guild.me:
+                    overwrites[guild.me] = discord.PermissionOverwrite(
+                        view_channel=True, send_messages=True, read_message_history=True
+                    )
+                for user_id in ADMIN_USER_IDS:
+                    member = guild.get_member(int(user_id))
+                    if member is None:
+                        try:
+                            member = await guild.fetch_member(int(user_id))
+                        except discord.DiscordException:
+                            member = None
+                    if member:
+                        overwrites[member] = discord.PermissionOverwrite(
+                            view_channel=True, send_messages=True, read_message_history=True
+                        )
+            try:
+                category = await guild.create_category(
+                    category_name, overwrites=overwrites,
+                    reason="Social Watch black and neon-green server rebuild"
+                )
+                made_categories += 1
+            except discord.HTTPException as error:
+                issues.append(f"{category_name}: {type(error).__name__}")
+                continue
+        for channel_name in channel_names:
+            if discord.utils.find(
+                lambda ch: ch.name == channel_name and ch.category_id == category.id,
+                guild.text_channels,
+            ):
+                continue
+            try:
+                await guild.create_text_channel(
+                    channel_name, category=category,
+                    topic="Social Watch black and neon-green control center.",
+                    reason="Social Watch black and neon-green server rebuild"
+                )
+                made_channels += 1
+            except discord.HTTPException as error:
+                issues.append(f"{channel_name}: {type(error).__name__}")
+    for role_name, color_value in [
+        ("Owner", 0x39FF14), ("Administrator", 0x20D840),
+        ("Moderator", 0x168A32), ("Automation", 0x526B58), ("Member", 0x252B27)
+    ]:
+        if discord.utils.get(guild.roles, name=role_name) is None:
+            try:
+                await guild.create_role(
+                    name=role_name, colour=discord.Colour(color_value),
+                    reason="Social Watch black and neon-green server rebuild"
+                )
+            except discord.HTTPException as error:
+                issues.append(f"Role {role_name}: {type(error).__name__}")
+    print(
+        f"Server layout applied in {guild.name}: categories={made_categories}, "
+        f"channels={made_channels}, issues={len(issues)}"
+    )
+    for issue in issues[:10]:
+        print("Server layout issue: " + issue)
+    return made_categories, made_channels, issues
+
+
 @client.event
 async def on_ready():
     global _CONFIG_SYNC_TASK
 
     print(f"Social Watch is online as {client.user}")
     await _ensure_control_channels()
+
+    # The user requested the rebuild directly; apply the additive, repeat-safe layout on startup.
+    for server in client.guilds:
+        if bot_has_guild_permission(server, "manage_channels"):
+            try:
+                await _apply_server_layout(server)
+            except discord.DiscordException as error:
+                print(f"Automatic server layout failed in {server.name}: {type(error).__name__}")
+        else:
+            print(f"Automatic server layout skipped in {server.name}: Manage Channels permission missing.")
 
     try:
         if MANAGEMENT_GUILD_ID.isdigit():
