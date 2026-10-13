@@ -798,10 +798,24 @@ async def forward_to_home_assistant(keyword_matches, discord_message, priority):
         return False
 
 
+# Discord can redeliver gateway events after reconnects. Keep a bounded cache so one
+# source message cannot create duplicate alerts during the same bot process.
+_SEEN_MESSAGE_IDS = set()
+_SEEN_MESSAGE_ORDER = []
+
 @client.event
 async def on_message(message):
     if message.author.bot or message.guild is None:
         return
+
+    message_id = message.id
+    if message_id in _SEEN_MESSAGE_IDS:
+        return
+    _SEEN_MESSAGE_IDS.add(message_id)
+    _SEEN_MESSAGE_ORDER.append(message_id)
+    if len(_SEEN_MESSAGE_ORDER) > 5000:
+        expired_id = _SEEN_MESSAGE_ORDER.pop(0)
+        _SEEN_MESSAGE_IDS.discard(expired_id)
 
     content = message.content.lower()
 
@@ -809,7 +823,7 @@ async def on_message(message):
         term = rule["term"]
         mode = rule.get("matchMode", "contains")
         if mode == "whole_word":
-            matched = re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", content) is not None
+            matched = re.search(r"(?<!\\w)" + re.escape(term) + r"(?!\\w)", content) is not None
         else:
             matched = term in content
         if not matched:
@@ -823,6 +837,17 @@ async def on_message(message):
 
     matched_terms = [rule["term"] for rule in matches]
     priority = get_priority(matches)
+    actions = {rule.get("action", "discord_nest") for rule in matches}
+
+    # Route each rule only to its own destinations. Dashboard history records every match.
+    discord_matches = [
+        rule for rule in matches
+        if rule.get("action", "discord_nest") in {"discord", "discord_nest"}
+    ]
+    nest_matches = [
+        rule for rule in matches
+        if rule.get("action", "discord_nest") in {"nest", "discord_nest"}
+    ]
 
     print(
         f"Keyword alert | Server: {message.guild.name} "
@@ -831,13 +856,8 @@ async def on_message(message):
         f"| Matches: {', '.join(matched_terms)}"
     )
 
-    # Each matching keyword selects its own destinations. Global switches still apply.
-    actions = {rule.get("action", "discord_nest") for rule in matches}
-    send_discord = bool(actions.intersection({"discord", "discord_nest"}))
-    send_nest = bool(actions.intersection({"nest", "discord_nest"}))
-
-    # Infrastructure keywords never act on ordinary monitored messages.
-    # The redeploy phrase requires both an allowlisted admin and an exact confirmation.
+    # Infrastructure actions never execute from a casual keyword match.
+    # Require an allowlisted admin and an exact confirmation phrase.
     if "redeploy" in actions:
         admin_confirmed = (
             str(message.author.id) in ADMIN_USER_IDS
@@ -852,8 +872,7 @@ async def on_message(message):
         else:
             print("Redeploy keyword matched; ignored because admin confirmation phrase was not exact.")
 
-    # Discord channel delivery is controlled both by each rule and the global switch.
-    if send_discord and AUTOMATION_SETTINGS.get("discordChannelAlertsEnabled", True):
+    if discord_matches and AUTOMATION_SETTINGS.get("discordChannelAlertsEnabled", True):
         alert_channel = client.get_channel(int(ALERT_CHANNEL_ID))
         if alert_channel is None:
             try:
@@ -864,13 +883,15 @@ async def on_message(message):
 
         if alert_channel is not None:
             channel_name = getattr(message.channel, "name", str(message.channel))
+            discord_terms = ", ".join(rule["term"] for rule in discord_matches)
+            discord_priority = get_priority(discord_matches)
             alert = (
-                "**Social Watch Alert**\n"
-                f"**Priority:** {priority.upper()}\n"
-                f"**Server:** {message.guild.name}\n"
-                f"**Channel:** #{channel_name}\n"
-                f"**Author:** {message.author}\n"
-                f"**Matched keywords:** {', '.join(matched_terms)}\n"
+                "**Social Watch Alert**\\n"
+                f"**Priority:** {discord_priority.upper()}\\n"
+                f"**Server:** {message.guild.name}\\n"
+                f"**Channel:** #{channel_name}\\n"
+                f"**Author:** {message.author}\\n"
+                f"**Matched keywords:** {discord_terms}\\n"
                 f"**Message:** {message.content[:1200]}"
             )
             try:
@@ -881,15 +902,15 @@ async def on_message(message):
                 print("Alert sent to Discord.")
             except discord.DiscordException as error:
                 print(f"Could not send alert to Discord: {error}")
-    elif not send_discord:
-        print("Matched keyword action does not include Discord delivery.")
-    else:
+    elif discord_matches:
         print("Discord channel notifications are disabled in dashboard settings.")
+    else:
+        print("Matched keyword action does not include Discord delivery.")
 
-    # Always retain matching events in dashboard history for audit and filtering.
+    # Persist every qualifying match so record-only rules remain visible in history.
     await forward_to_dashboard(matches, message, priority)
-    if send_nest:
-        await forward_to_home_assistant(matches, message, priority)
+    if nest_matches:
+        await forward_to_home_assistant(nest_matches, message, get_priority(nest_matches))
     else:
         print("Matched keyword action does not include Google Nest delivery.")
 
