@@ -620,7 +620,8 @@ async def _apply_server_layout(guild):
     for category_name, channel_names in layout.items():
         category = discord.utils.get(guild.categories, name=category_name)
         if category is None:
-            overwrites = None
+            # discord.py expects a dict for overwrites; an empty dict means default permissions.
+            overwrites = {}
             if category_name == "▰ SYSTEM LOGS":
                 overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
                 if guild.me:
