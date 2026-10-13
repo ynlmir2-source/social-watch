@@ -203,8 +203,8 @@ async def _update_status_channels():
         except (aiohttp.ClientError, asyncio.TimeoutError):
             dashboard_ok = False
     configured = bool(DASHBOARD_URL and DASHBOARD_INGEST_KEY)
-    healthy = client.is_ready() and (dashboard_ok or not configured) and not recent_error
-    emoji = "🟢" if healthy else "🟠"
+    healthy = (dashboard_ok or not configured) and not recent_error
+    emoji = "🔴" if not client.is_ready() else ("🟢" if healthy else "🟠")
     for guild_id, channel in list(_STATUS_CHANNELS.items()):
         if channel.guild is None:
             continue
@@ -524,6 +524,12 @@ async def config_sync_loop():
         await post_integration_heartbeat("discord_bot", "connected")
         await _update_status_channels()
         await asyncio.sleep(60)
+
+
+@client.event
+async def on_disconnect():
+    # While the process is still alive, try to mark every status VC red if the bot disconnects.
+    await _update_status_channels()
 
 
 @client.event
