@@ -46,7 +46,8 @@ async def on_message(message):
         f"| Channel: {message.channel} "
         f"| Matches: {', '.join(matches)}"
     )
-
+    print(f"DEBUG: Looking up alert channel ID: {ALERT_CHANNEL_ID}")
+    print(f"DEBUG: Looking up alert channel ID: {ALERT_CHANNEL_ID}")
     alert_channel = client.get_channel(int(ALERT_CHANNEL_ID))
 
     if alert_channel is None:
@@ -68,6 +69,7 @@ async def on_message(message):
     )
 
     try:
+        print("DEBUG: Attempting to send alert")
         await alert_channel.send(
             alert,
             allowed_mentions=discord.AllowedMentions.none()
