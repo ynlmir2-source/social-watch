@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 import discord
+from discord import app_commands
 
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -60,6 +61,191 @@ if not ALERT_CHANNEL_ID.isdigit():
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+
+tree = app_commands.CommandTree(client)
+management_group = app_commands.Group(
+    name="socialwatch",
+    description="Secure Social Watch server-management commands",
+)
+ADMIN_USER_IDS = {
+    item.strip()
+    for item in os.environ.get("SOCIAL_WATCH_ADMIN_IDS", "").split(",")
+    if item.strip().isdigit()
+}
+MANAGEMENT_GUILD_ID = os.environ.get("MANAGEMENT_GUILD_ID", "").strip()
+
+
+async def is_authorized_admin(interaction: discord.Interaction) -> bool:
+    """Require an explicitly allowlisted user as well as Manage Server."""
+    if interaction.guild is None or interaction.user is None:
+        return False
+    return str(interaction.user.id) in ADMIN_USER_IDS
+
+
+def bot_has_guild_permission(guild: discord.Guild, permission: str) -> bool:
+    member = guild.me
+    return bool(member and getattr(member.guild_permissions, permission, False))
+
+
+async def management_denied(interaction: discord.Interaction, message: str):
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+
+
+@management_group.command(name="channels", description="List this server's channels and categories")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.check(is_authorized_admin)
+async def socialwatch_channels(interaction: discord.Interaction):
+    guild = interaction.guild
+    if guild is None:
+        return await management_denied(interaction, "Use this command inside a server.")
+    lines = []
+    for channel in sorted(guild.channels, key=lambda item: (item.position, item.name.lower())):
+        kind = "category" if isinstance(channel, discord.CategoryChannel) else (
+            "voice" if isinstance(channel, discord.VoiceChannel) else
+            "text" if isinstance(channel, discord.TextChannel) else "other"
+        )
+        lines.append(f"• {channel.name} — {kind} — ID: {channel.id}")
+    body = "\\n".join(lines) or "This server has no visible channels."
+    await interaction.response.send_message(body[:1900], ephemeral=True)
+
+
+@management_group.command(name="create-channel", description="Create a text or voice channel")
+@app_commands.describe(name="New channel name", channel_type="Text or voice channel", category="Optional existing category name")
+@app_commands.choices(channel_type=[
+    app_commands.Choice(name="Text", value="text"),
+    app_commands.Choice(name="Voice", value="voice"),
+])
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_channels=True, manage_guild=True)
+@app_commands.check(is_authorized_admin)
+async def socialwatch_create_channel(
+    interaction: discord.Interaction,
+    name: str,
+    channel_type: app_commands.Choice[str],
+    category: str = "",
+):
+    guild = interaction.guild
+    if guild is None:
+        return await management_denied(interaction, "Use this command inside a server.")
+    if not bot_has_guild_permission(guild, "manage_channels"):
+        return await management_denied(interaction, "Social Watch needs the Manage Channels permission.")
+    clean_name = name.strip().lower().replace(" ", "-")[:100]
+    if not clean_name:
+        return await management_denied(interaction, "Enter a valid channel name.")
+    parent = None
+    if category.strip():
+        parent = discord.utils.find(
+            lambda item: item.name.casefold() == category.strip().casefold(),
+            guild.categories,
+        )
+        if parent is None:
+            return await management_denied(interaction, f"I couldn't find a category named '{category}'.")
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        if channel_type.value == "voice":
+            created = await guild.create_voice_channel(clean_name, category=parent, reason=f"Social Watch command by {interaction.user.id}")
+        else:
+            created = await guild.create_text_channel(clean_name, category=parent, reason=f"Social Watch command by {interaction.user.id}")
+        await interaction.followup.send(f"Created {created.mention} (ID: {created.id}).", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("Discord denied this action. Check Social Watch's channel permissions and role position.", ephemeral=True)
+    except discord.HTTPException as error:
+        await interaction.followup.send(f"Discord couldn't create the channel: {error}", ephemeral=True)
+
+
+@management_group.command(name="create-category", description="Create a channel category")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_channels=True, manage_guild=True)
+@app_commands.check(is_authorized_admin)
+async def socialwatch_create_category(interaction: discord.Interaction, name: str):
+    guild = interaction.guild
+    if guild is None:
+        return await management_denied(interaction, "Use this command inside a server.")
+    if not bot_has_guild_permission(guild, "manage_channels"):
+        return await management_denied(interaction, "Social Watch needs the Manage Channels permission.")
+    clean_name = name.strip()[:100]
+    if not clean_name:
+        return await management_denied(interaction, "Enter a category name.")
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        created = await guild.create_category(clean_name, reason=f"Social Watch command by {interaction.user.id}")
+        await interaction.followup.send(f"Created category **{created.name}** (ID: {created.id}).", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("Discord denied this action. Check Social Watch's Manage Channels permission.", ephemeral=True)
+    except discord.HTTPException as error:
+        await interaction.followup.send(f"Discord couldn't create the category: {error}", ephemeral=True)
+
+
+@management_group.command(name="create-role", description="Create a role with an optional hex color")
+@app_commands.describe(name="New role name", color="Hex color such as #5865F2")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_roles=True, manage_guild=True)
+@app_commands.check(is_authorized_admin)
+async def socialwatch_create_role(
+    interaction: discord.Interaction,
+    name: str,
+    color: str = "#5865F2",
+):
+    guild = interaction.guild
+    if guild is None:
+        return await management_denied(interaction, "Use this command inside a server.")
+    if not bot_has_guild_permission(guild, "manage_roles"):
+        return await management_denied(interaction, "Social Watch needs the Manage Roles permission.")
+    clean_name = name.strip()[:100]
+    if not clean_name:
+        return await management_denied(interaction, "Enter a role name.")
+    try:
+        role_color = discord.Color(int(color.strip().lstrip("#"), 16))
+    except (ValueError, AttributeError):
+        return await management_denied(interaction, "Use a valid hex color, for example #5865F2.")
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        created = await guild.create_role(name=clean_name, colour=role_color, reason=f"Social Watch command by {interaction.user.id}")
+        await interaction.followup.send(f"Created role **{created.name}** (ID: {created.id}).", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("Discord denied this action. Check Manage Roles and ensure the bot's top role is high enough.", ephemeral=True)
+    except discord.HTTPException as error:
+        await interaction.followup.send(f"Discord couldn't create the role: {error}", ephemeral=True)
+
+
+@management_group.command(name="rename-server", description="Change this server's name")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.check(is_authorized_admin)
+async def socialwatch_rename_server(interaction: discord.Interaction, name: str):
+    guild = interaction.guild
+    if guild is None:
+        return await management_denied(interaction, "Use this command inside a server.")
+    if not bot_has_guild_permission(guild, "manage_guild"):
+        return await management_denied(interaction, "Social Watch needs the Manage Server permission.")
+    clean_name = name.strip()[:100]
+    if not clean_name:
+        return await management_denied(interaction, "Enter a server name.")
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        await guild.edit(name=clean_name, reason=f"Social Watch command by {interaction.user.id}")
+        await interaction.followup.send(f"Server renamed to **{clean_name}**.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("Discord denied this action. Check Social Watch's Manage Server permission.", ephemeral=True)
+    except discord.HTTPException as error:
+        await interaction.followup.send(f"Discord couldn't rename the server: {error}", ephemeral=True)
+
+
+tree.add_command(management_group)
+
+
+@tree.error
+async def on_management_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        message = "Access denied. You need Manage Server plus your Discord user ID must be listed in SOCIAL_WATCH_ADMIN_IDS in Railway."
+    else:
+        print(f"Social Watch command error: {type(error).__name__}: {error}")
+        message = "The command failed. Check the Social Watch Railway logs for details."
+    await management_denied(interaction, message)
 
 
 async def post_integration_heartbeat(service, status="connected"):
@@ -190,6 +376,20 @@ async def on_ready():
     global _CONFIG_SYNC_TASK
 
     print(f"Social Watch is online as {client.user}")
+
+    try:
+        if MANAGEMENT_GUILD_ID.isdigit():
+            target_guild = discord.Object(id=int(MANAGEMENT_GUILD_ID))
+            tree.copy_global_to(guild=target_guild)
+            synced = await tree.sync(guild=target_guild)
+            print(f"Synced {len(synced)} management commands to guild {MANAGEMENT_GUILD_ID}.")
+        else:
+            synced = await tree.sync()
+            print(f"Synced {len(synced)} global management commands.")
+        if not ADMIN_USER_IDS:
+            print("WARNING: SOCIAL_WATCH_ADMIN_IDS is empty; management commands are locked to everyone.")
+    except discord.HTTPException as error:
+        print(f"Could not sync management commands: {type(error).__name__}: {error}")
 
     if DASHBOARD_URL and DASHBOARD_INGEST_KEY:
         print("Dashboard forwarding is configured.")
