@@ -152,7 +152,7 @@ class _DiscordLogHandler(logging.Handler):
 
 logging.getLogger().setLevel(logging.INFO)
 _log_handler = _DiscordLogHandler()
-_log_handler.setLevel(logging.WARNING)
+_log_handler.setLevel(logging.INFO)
 _log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
 logging.getLogger().addHandler(_log_handler)
 
@@ -170,6 +170,11 @@ async def _ensure_control_channels():
             overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, embed_links=True)
         for user_id in ADMIN_USER_IDS:
             member = guild.get_member(int(user_id))
+            if member is None:
+                try:
+                    member = await guild.fetch_member(int(user_id))
+                except discord.DiscordException:
+                    member = None
             if member:
                 overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         try:
@@ -187,6 +192,11 @@ async def _ensure_control_channels():
         if status_channel is not None:
             _STATUS_CHANNELS[server.id] = status_channel
     await _update_status_channels()
+    builtins.print(
+        "Social Watch system logging ready: "
+        + ("Discord log channel ID " + str(_LOG_CHANNEL.id) if _LOG_CHANNEL else "Discord log channel unavailable")
+        + "; status voice channels=" + str(len(_STATUS_CHANNELS))
+    )
 
 async def _update_status_channels():
     if not _STATUS_CHANNELS:
