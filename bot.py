@@ -606,6 +606,161 @@ async def on_disconnect():
     await _update_status_channels()
 
 
+class AnnouncementModal(discord.ui.Modal, title="Post an announcement"):
+    announcement = discord.ui.TextInput(label="Announcement", style=discord.TextStyle.paragraph, max_length=1800, required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None or str(interaction.user.id) not in ADMIN_USER_IDS:
+            return await interaction.response.send_message("Only an allowlisted Social Watch admin can post announcements.", ephemeral=True)
+        if not isinstance(interaction.channel, discord.TextChannel):
+            return await interaction.response.send_message("Use this in the announcements channel.", ephemeral=True)
+        try:
+            await interaction.channel.send("📣 ANNOUNCEMENT\n" + self.announcement.value, allowed_mentions=discord.AllowedMentions.none())
+            await interaction.response.send_message("Announcement posted.", ephemeral=True)
+        except discord.DiscordException as error:
+            await interaction.response.send_message("Announcement could not be posted: " + type(error).__name__, ephemeral=True)
+
+
+class KeywordTestModal(discord.ui.Modal, title="Test watched keywords"):
+    test_message = discord.ui.TextInput(label="Message to test", style=discord.TextStyle.paragraph, max_length=1500, required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        sample = str(self.test_message.value).lower()
+        matches = []
+        for rule in KEYWORD_RULES:
+            term = str(rule.get("term", "")).strip().lower()
+            if not term:
+                continue
+            found = bool(re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", sample)) if rule.get("matchMode") == "whole_word" else term in sample
+            exclusions = rule.get("exclude", [])
+            if found and not any(str(item).lower() in sample for item in exclusions):
+                matches.append("• " + term + " — " + str(rule.get("priority", "normal")) + " priority / " + str(rule.get("action", "discord_nest")))
+        await interaction.response.send_message("\n".join(matches[:15]) if matches else "No active keyword rules matched that sample.", ephemeral=True)
+
+
+PANEL_CONFIG = {
+    "welcome": ("OPEN QUICK GUIDE", "Quick guide to Social Watch."),
+    "announcements": ("POST ANNOUNCEMENT", "Open a form and publish an announcement here. Admin-only."),
+    "system-status": ("CHECK SYSTEM STATUS", "Check whether the bot and dashboard are responding."),
+    "live-alerts": ("TOGGLE LIVE ALERTS", "Pause or resume Discord alert delivery for this bot process."),
+    "social-feed": ("OPEN DASHBOARD", "Get the Social Watch dashboard link."),
+    "keyword-matches": ("TEST KEYWORDS", "Test a sample message against active keyword rules."),
+    "bot-commands": ("COMMAND GUIDE", "Show available Social Watch slash-command groups."),
+    "automation-settings": ("VIEW SETTINGS", "Inspect current notification and quiet-hour settings."),
+    "integration-status": ("CHECK INTEGRATIONS", "Check dashboard reachability and Home Assistant configuration."),
+    "event-logs": ("RECENT EVENTS", "Show recent messages in this channel."),
+    "error-logs": ("RECENT ERRORS", "Filter this channel for recent error-like messages."),
+    "audit-log": ("RECORD PANEL USE", "Write a small audit entry to this channel."),
+}
+
+
+class SocialWatchPanel(discord.ui.View):
+    def __init__(self, panel_key: str):
+        super().__init__(timeout=None)
+        self.panel_key = panel_key
+        label, _description = PANEL_CONFIG[panel_key]
+        button = discord.ui.Button(label=label, style=discord.ButtonStyle.success, custom_id="socialwatch:panel:" + panel_key)
+        button.callback = self.run_action
+        self.add_item(button)
+
+    async def run_action(self, interaction: discord.Interaction):
+        key = self.panel_key
+        channel = interaction.channel
+        if key == "announcements":
+            if str(interaction.user.id) not in ADMIN_USER_IDS:
+                return await interaction.response.send_message("Only an allowlisted Social Watch admin can post announcements.", ephemeral=True)
+            return await interaction.response.send_modal(AnnouncementModal())
+        if key == "keyword-matches":
+            return await interaction.response.send_modal(KeywordTestModal())
+        if key == "live-alerts":
+            AUTOMATION_SETTINGS["discordChannelAlertsEnabled"] = not AUTOMATION_SETTINGS.get("discordChannelAlertsEnabled", True)
+            state = "ON" if AUTOMATION_SETTINGS["discordChannelAlertsEnabled"] else "PAUSED"
+            return await interaction.response.send_message("Discord alert delivery is now " + state + " for this bot process. This toggle may reset after restart or settings sync.", ephemeral=True)
+        if key in {"system-status", "integration-status"}:
+            dashboard_ok = False
+            if DASHBOARD_URL.startswith("https://"):
+                try:
+                    timeout = aiohttp.ClientTimeout(total=4)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.get(DASHBOARD_URL + "/health") as response:
+                            dashboard_ok = response.status == 200
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    pass
+            if key == "system-status":
+                result = "Bot: " + ("online" if client.is_ready() else "offline") + "\nDashboard: " + ("healthy" if dashboard_ok else "unreachable / not configured")
+            else:
+                result = "Dashboard: " + ("reachable" if dashboard_ok else "unreachable / not configured") + "\nHome Assistant webhook: " + ("configured" if HOME_ASSISTANT_WEBHOOK_URL.startswith("https://") else "not configured")
+            return await interaction.response.send_message(result, ephemeral=True)
+        if key == "social-feed":
+            return await interaction.response.send_message("Social Watch dashboard: " + (DASHBOARD_URL or "not configured in Railway"), ephemeral=True)
+        if key == "bot-commands":
+            return await interaction.response.send_message("Commands: /socialwatch channels, /socialwatch infrastructure, /socialwatch create-channel, /socialwatch create-category, /socialwatch create-role. Management actions require an allowlisted admin.", ephemeral=True)
+        if key == "automation-settings":
+            settings = AUTOMATION_SETTINGS
+            result = "Discord alerts: " + ("enabled" if settings.get("discordChannelAlertsEnabled") else "paused")
+            result += "\nHome Assistant announcements: " + ("enabled" if settings.get("homeAssistantAnnouncementsEnabled") else "disabled")
+            result += "\nNest mode: " + str(settings.get("nestAnnouncementMode", "unknown"))
+            result += "\nQuiet hours: " + ("enabled" if settings.get("quietHoursEnabled") else "disabled") + " (" + str(settings.get("quietHoursStart", "22:00")) + "–" + str(settings.get("quietHoursEnd", "07:00")) + " " + str(settings.get("timezone", "America/New_York")) + ")"
+            return await interaction.response.send_message(result, ephemeral=True)
+        if key == "audit-log" and isinstance(channel, discord.TextChannel):
+            try:
+                await channel.send("Panel used by " + str(interaction.user) + " (ID " + str(interaction.user.id) + ") at " + datetime.now().astimezone().isoformat(timespec="seconds"), allowed_mentions=discord.AllowedMentions.none())
+            except discord.DiscordException:
+                pass
+            return await interaction.response.send_message("Audit entry attempted in this channel.", ephemeral=True)
+        if key in {"event-logs", "error-logs"} and isinstance(channel, discord.TextChannel):
+            entries = []
+            async for message in channel.history(limit=30):
+                if message.author.id == client.user.id and "SOCIAL_WATCH_PANEL:" in message.content:
+                    continue
+                value = message.content.strip().replace("\n", " ")
+                if key == "error-logs" and not any(word in value.lower() for word in ("error", "failed", "failure", "exception", "critical", "traceback", "denied")):
+                    continue
+                if value:
+                    entries.append("• " + message.created_at.strftime("%m-%d %H:%M") + " — " + value[:180])
+                if len(entries) >= 8:
+                    break
+            heading = "Recent errors" if key == "error-logs" else "Recent events"
+            return await interaction.response.send_message(heading + "\n" + ("\n".join(entries) if entries else "No matching messages found in this channel yet."), ephemeral=True)
+        return await interaction.response.send_message("Social Watch quick guide: use the pinned button in each channel for its matching action. Keyword testing is in keyword-matches; status checks are in system-status; integrations are in integration-status.", ephemeral=True)
+
+
+async def _ensure_channel_panels(guild):
+    created = 0
+    for channel_name, (button_label, description) in PANEL_CONFIG.items():
+        channel = discord.utils.get(guild.text_channels, name=channel_name)
+        if channel is None:
+            continue
+        view = SocialWatchPanel(channel_name)
+        client.add_view(view)
+        marker = "SOCIAL_WATCH_PANEL:" + channel_name
+        existing = None
+        try:
+            async for message in channel.history(limit=50):
+                if message.author.id == client.user.id and marker in message.content:
+                    existing = message
+                    break
+        except discord.DiscordException as error:
+            print("Panel lookup failed in #" + channel_name + ": " + type(error).__name__)
+            continue
+        if existing is None:
+            try:
+                message = await channel.send("🟢 SOCIAL WATCH · " + channel_name.upper() + "\n" + description + "\n\nPress the button below whenever you need this action.\n" + marker, view=view, allowed_mentions=discord.AllowedMentions.none())
+                try:
+                    await message.pin(reason="Persistent Social Watch channel action panel")
+                except discord.DiscordException as error:
+                    print("Could not pin panel in #" + channel_name + ": " + type(error).__name__)
+                created += 1
+            except discord.DiscordException as error:
+                print("Panel creation failed in #" + channel_name + ": " + type(error).__name__)
+        else:
+            try:
+                await existing.edit(view=view)
+            except discord.DiscordException as error:
+                print("Panel refresh failed in #" + channel_name + ": " + type(error).__name__)
+    print("Social Watch channel panels ready in " + guild.name + ": created=" + str(created) + ", total=" + str(len(PANEL_CONFIG)))
+
+
 async def _apply_server_layout(guild):
     """Idempotently add the Social Watch layout without deleting existing server assets."""
     layout = {
@@ -696,6 +851,7 @@ async def on_ready():
         if bot_has_guild_permission(server, "manage_channels"):
             try:
                 await _apply_server_layout(server)
+                await _ensure_channel_panels(server)
             except discord.DiscordException as error:
                 print(f"Automatic server layout failed in {server.name}: {type(error).__name__}")
         else:
