@@ -1516,7 +1516,6 @@ async def socialwatch_racksarchive(interaction: discord.Interaction):
             "🧑‍🎤・artist-showcase": "Artist profiles, inspirations, releases, and creative goals.",
             "💿・sample-packs": "Discuss royalty-free samples, drum kits, presets, and sound design resources.",
             "🤝・music-collabs": "Find producers, rappers, singers, engineers, and collaborators.",
-            "🔊・beat-making-vc": "Voice room for live beat-making, listening sessions, and production talk.",
         },
         "📺 ANIME LOUNGE": {
             "🍿・anime-watch-party": "Coordinate watch parties and discuss where to stream shows through official services.",
@@ -1527,7 +1526,6 @@ async def socialwatch_racksarchive(interaction: discord.Interaction):
             "🚨・spoiler-zone": "Spoilers allowed here. Keep major spoilers inside this channel.",
             "📚・manga-corner": "Manga chapters, adaptations, theories, and reading recommendations.",
             "🎮・anime-gaming": "Anime games, gaming clips, cosplay, fan art, and related culture.",
-            "📺・anime-watch-vc": "Voice room for watch parties and live anime discussion.",
         },
         "🌐 RACKSARCHIVE COMMUNITY": {
             "👋・welcome": "Start here: introduce yourself and choose whether you are here for music, anime, or both.",
