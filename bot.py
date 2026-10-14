@@ -1725,6 +1725,52 @@ async def socialwatch_reset_racksarchive(interaction: discord.Interaction):
     await interaction.followup.send(result[:1900], ephemeral=True)
 
 
+@management_group.command(name="delete-above-audit-log", description="Delete channels above audit-log and leave audit-log and below")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_channels=True, manage_guild=True)
+@app_commands.check(is_authorized_admin)
+async def socialwatch_delete_above_audit_log(interaction: discord.Interaction):
+    """Delete channels ordered before audit-log; preserve audit-log, channels below it, roles, and settings."""
+    guild = interaction.guild
+    if guild is None:
+        return await management_denied(interaction, "Use this command inside the server you want to clean.")
+    if not bot_has_guild_permission(guild, "manage_channels"):
+        return await management_denied(interaction, "Social Watch needs Manage Channels permission.")
+
+    audit = discord.utils.find(
+        lambda channel: isinstance(channel, discord.TextChannel) and channel.name.casefold() == "audit-log",
+        guild.channels,
+    )
+    if audit is None:
+        return await management_denied(interaction, "I couldn't find a text channel named audit-log. Nothing was changed.")
+
+    # Use Discord's visible channel ordering. Keep audit-log and anything after it.
+    ordered = sorted(
+        [channel for channel in guild.channels if not isinstance(channel, discord.CategoryChannel)],
+        key=lambda channel: (channel.position, channel.id),
+    )
+    try:
+        audit_index = next(i for i, channel in enumerate(ordered) if channel.id == audit.id)
+    except StopIteration:
+        return await management_denied(interaction, "Couldn't determine audit-log's channel position. Nothing was changed.")
+
+    targets = ordered[:audit_index]
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    deleted = 0
+    failures = []
+    for channel in targets:
+        try:
+            await channel.delete(reason=f"Admin requested deletion of channels above audit-log ({interaction.user.id})")
+            deleted += 1
+        except discord.HTTPException as error:
+            failures.append(f"{channel.name}: {type(error).__name__}")
+
+    result = f"Finished. Deleted {deleted} channel(s) ordered above #{audit.name}. The audit-log channel and channels below it were left untouched."
+    if failures:
+        result += "\\nCould not delete: " + "; ".join(failures[:8])
+    await interaction.followup.send(result[:1900], ephemeral=True)
+
+
 @management_group.command(name="invite", description="Get a link to add Social Watch to another server")
 @app_commands.guild_only()
 @app_commands.check(is_authorized_admin)
