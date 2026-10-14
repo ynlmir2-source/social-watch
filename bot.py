@@ -1496,4 +1496,135 @@ async def socialwatch_rebuild(interaction: discord.Interaction):
     await interaction.followup.send(result[:1900], ephemeral=True)
 
 
+@management_group.command(name="racksarchive", description="Build the RacksArchive Music + Anime server layout")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_channels=True, manage_guild=True)
+@app_commands.check(is_authorized_admin)
+async def socialwatch_racksarchive(interaction: discord.Interaction):
+    """Create a separate music-making hub and anime watch lounge without deleting existing channels."""
+    guild = interaction.guild
+    if guild is None:
+        return await management_denied(interaction, "Use this command inside a server.")
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    layout = {
+        "🎵 MUSIC STUDIO": {
+            "🎛️・music-lab": "Create beats, talk DAWs, plugins, drum kits, mixing, and production workflows.",
+            "🥁・beat-feedback": "Post beats and get constructive feedback on drums, bounce, melodies, and mix.",
+            "🎙️・recording-booth": "Recording tips, vocals, punch-ins, mixing, and mastering help.",
+            "🎧・song-drops": "Share finished songs, snippets, releases, and music videos you made or have permission to share.",
+            "🧑‍🎤・artist-showcase": "Artist profiles, inspirations, releases, and creative goals.",
+            "💿・sample-packs": "Discuss royalty-free samples, drum kits, presets, and sound design resources.",
+            "🤝・music-collabs": "Find producers, rappers, singers, engineers, and collaborators.",
+            "🔊・beat-making-vc": "Voice room for live beat-making, listening sessions, and production talk.",
+        },
+        "📺 ANIME LOUNGE": {
+            "🍿・anime-watch-party": "Coordinate watch parties and discuss where to stream shows through official services.",
+            "🔗・official-watch-links": "Share legal streaming links, official trailers, and episode pages.",
+            "⭐・anime-recommendations": "Ask for and share anime recommendations by genre, mood, or length.",
+            "🎬・trailers-and-clips": "Post official trailers and clips, or content you have permission to share.",
+            "💬・episode-discussion": "Talk about episodes and characters; use spoiler tags for major reveals.",
+            "🚨・spoiler-zone": "Spoilers allowed here. Keep major spoilers inside this channel.",
+            "📚・manga-corner": "Manga chapters, adaptations, theories, and reading recommendations.",
+            "🎮・anime-gaming": "Anime games, gaming clips, cosplay, fan art, and related culture.",
+            "📺・anime-watch-vc": "Voice room for watch parties and live anime discussion.",
+        },
+        "🌐 RACKSARCHIVE COMMUNITY": {
+            "👋・welcome": "Start here: introduce yourself and choose whether you are here for music, anime, or both.",
+            "📢・announcements": "RacksArchive news, events, releases, and community updates.",
+            "💬・general-chat": "Everyday community chat.",
+            "🤖・bot-commands": "Use bot commands here so the other channels stay focused.",
+        },
+    }
+
+    made_categories = 0
+    made_channels = 0
+    existing_channels = 0
+    issues = []
+    for category_name, channels in layout.items():
+        category = discord.utils.get(guild.categories, name=category_name)
+        if category is None:
+            try:
+                category = await guild.create_category(
+                    category_name, reason="RacksArchive music and anime layout"
+                )
+                made_categories += 1
+            except discord.HTTPException as error:
+                issues.append(f"{category_name}: {type(error).__name__}")
+                continue
+        for channel_name, topic in channels.items():
+            existing = discord.utils.find(
+                lambda channel: channel.name == channel_name and channel.category_id == category.id,
+                guild.text_channels,
+            )
+            if existing:
+                existing_channels += 1
+                if existing.topic != topic:
+                    try:
+                        await existing.edit(topic=topic, reason="Update RacksArchive channel purpose")
+                    except discord.HTTPException as error:
+                        issues.append(f"{channel_name} topic: {type(error).__name__}")
+                continue
+            try:
+                await guild.create_text_channel(
+                    channel_name, category=category, topic=topic,
+                    reason="RacksArchive music and anime layout"
+                )
+                made_channels += 1
+            except discord.HTTPException as error:
+                issues.append(f"{channel_name}: {type(error).__name__}")
+
+    # Create the two voice rooms separately; repeated runs are safe.
+    for category_name, channel_name in [
+        ("🎵 MUSIC STUDIO", "🔊・beat-making-vc"),
+        ("📺 ANIME LOUNGE", "📺・anime-watch-vc"),
+    ]:
+        category = discord.utils.get(guild.categories, name=category_name)
+        if category and not discord.utils.find(
+            lambda channel: channel.name == channel_name and channel.category_id == category.id,
+            guild.voice_channels,
+        ):
+            try:
+                await guild.create_voice_channel(
+                    channel_name, category=category,
+                    reason="RacksArchive voice rooms"
+                )
+                made_channels += 1
+            except discord.HTTPException as error:
+                issues.append(f"{channel_name}: {type(error).__name__}")
+
+    result = (
+        "**RacksArchive layout finished**\n"
+        f"Categories created: {made_categories}\n"
+        f"Channels created: {made_channels}\n"
+        f"Already present: {existing_channels}\n"
+        "Existing channels were not deleted or renamed. Music production and anime viewing/discussion have separate categories."
+    )
+    if issues:
+        result += "\nIssues: " + "; ".join(issues[:8])
+    await interaction.followup.send(result[:1900], ephemeral=True)
+
+
+@management_group.command(name="invite", description="Get a link to add Social Watch to another server")
+@app_commands.guild_only()
+@app_commands.check(is_authorized_admin)
+async def socialwatch_invite(interaction: discord.Interaction):
+    if client.user is None:
+        return await management_denied(interaction, "The bot identity is not ready yet.")
+    permissions = discord.Permissions(
+        view_channel=True, send_messages=True, read_message_history=True,
+        embed_links=True, attach_files=True, manage_channels=True,
+        manage_roles=True, manage_messages=True, connect=True, speak=True,
+        use_application_commands=True,
+    )
+    invite_url = discord.utils.oauth_url(
+        client.user.id, permissions=permissions, scopes=("bot", "applications.commands")
+    )
+    await interaction.response.send_message(
+        f"Add Social Watch to a server you manage: {invite_url}",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 client.run(TOKEN)
