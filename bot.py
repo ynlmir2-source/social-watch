@@ -1619,6 +1619,105 @@ async def socialwatch_racksarchive(interaction: discord.Interaction):
     await interaction.followup.send(result[:1900], ephemeral=True)
 
 
+
+@management_group.command(name="reset-racksarchive", description="Replace old channels with the planned RacksArchive layout")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_channels=True, manage_guild=True)
+@app_commands.check(is_authorized_admin)
+async def socialwatch_reset_racksarchive(interaction: discord.Interaction):
+    """Reset channels only in the specifically approved RacksArchive server; preserve roles and members."""
+    target_guild_id = 1552866429865558086
+    guild = interaction.guild
+    if guild is None:
+        return await management_denied(interaction, "Run this inside the new RacksArchive server.")
+    if guild.id != target_guild_id:
+        return await management_denied(interaction, "Safety stop: this command only works in the approved RacksArchive server. Nothing was changed.")
+    if not bot_has_guild_permission(guild, "manage_channels"):
+        return await management_denied(interaction, "The bot needs Manage Channels permission.")
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    deleted = 0
+    issues = []
+    # Delete only channels/categories in the approved guild. Do not delete roles, members, or server settings.
+    for channel in list(guild.channels):
+        if isinstance(channel, discord.CategoryChannel):
+            continue
+        try:
+            await channel.delete(reason="User-confirmed RacksArchive-only channel reset")
+            deleted += 1
+        except discord.HTTPException as error:
+            issues.append(f"{channel.name}: {type(error).__name__}")
+    for category in list(guild.categories):
+        try:
+            await category.delete(reason="User-confirmed RacksArchive-only category reset")
+        except discord.HTTPException as error:
+            issues.append(f"{category.name}: {type(error).__name__}")
+
+    layout = {
+        "🎵 RACKS MUSIC LAB": {
+            "🎛️・music-lab": "Create beats, discuss DAWs, plugins, drum kits, mixing, and production workflows.",
+            "🥁・beat-feedback": "Post beats and get feedback on drums, bounce, melodies, and mix.",
+            "🎙️・recording-booth": "Recording tips, vocals, punch-ins, mixing, and mastering.",
+            "🎧・song-drops": "Share finished songs, snippets, releases, and music videos you made or have permission to share.",
+            "🧑‍🎤・artist-profiles": "Artist profiles, inspirations, releases, and creative goals.",
+            "💿・beat-market": "Share original beats and discuss licensing and permissions.",
+            "✍️・lyrics-and-writing": "Write lyrics, exchange ideas, and workshop songs.",
+            "🤝・music-collabs": "Find producers, rappers, singers, engineers, and collaborators.",
+            "📦・racksarchive": "Organize released music, original beats, projects, and authorized archives.",
+            "🎬・music-videos": "Share music videos and visualizers you own or have permission to post.",
+            "🔊・beat-making-vc": None,
+        },
+        "📺 ANIME WORLD": {
+            "⭐・anime-recommendations": "Find anime by genre, mood, length, and streaming availability.",
+            "📅・seasonal-anime": "Discuss current-season shows and upcoming releases.",
+            "🎬・trailers-and-clips": "Official trailers and clips, or content you have permission to share.",
+            "🔗・where-to-watch": "Share official streaming services and legal episode links.",
+            "🍿・watch-party-events": "Coordinate watch parties and discuss viewing schedules.",
+            "📺・watchlists": "Keep personal watchlists and recommendations.",
+            "💬・anime-discussion": "Talk about series, characters, studios, and theories.",
+            "🗯️・episode-reactions": "React to episodes and new releases; use spoiler tags.",
+            "🚨・spoilers": "Major spoilers belong here.",
+            "📚・manga-corner": "Manga chapters, adaptations, theories, and reading recommendations.",
+            "📺・anime-watch-vc": None,
+        },
+        "🌐 RACKSARCHIVE COMMUNITY": {
+            "👋・welcome-and-rules": "Welcome to RacksArchive. Read the rules and introduce yourself.",
+            "📢・announcements": "RacksArchive community news, events, and updates.",
+            "💬・general-chat": "Everyday community chat.",
+            "🤖・bot-commands": "Use bot commands here to keep other channels focused.",
+        },
+    }
+    created_categories = 0
+    created_channels = 0
+    for category_name, channel_map in layout.items():
+        try:
+            category = await guild.create_category(category_name, reason="Rebuild planned RacksArchive layout")
+            created_categories += 1
+        except discord.HTTPException as error:
+            issues.append(f"{category_name}: {type(error).__name__}")
+            continue
+        for channel_name, topic in channel_map.items():
+            try:
+                if topic is None:
+                    await guild.create_voice_channel(channel_name, category=category, reason="Rebuild planned RacksArchive layout")
+                else:
+                    await guild.create_text_channel(channel_name, category=category, topic=topic, reason="Rebuild planned RacksArchive layout")
+                created_channels += 1
+            except discord.HTTPException as error:
+                issues.append(f"{channel_name}: {type(error).__name__}")
+
+    result = (
+        "**RacksArchive reset complete**\\n"
+        f"Old channels deleted: {deleted}\\n"
+        f"Categories created: {created_categories}\\n"
+        f"New channels created: {created_channels}\\n"
+        "Roles, members, and server settings were preserved. This command is locked to the approved server ID."
+    )
+    if issues:
+        result += "\\nIssues: " + "; ".join(issues[:8])
+    await interaction.followup.send(result[:1900], ephemeral=True)
+
+
 @management_group.command(name="invite", description="Get a link to add Social Watch to another server")
 @app_commands.guild_only()
 @app_commands.check(is_authorized_admin)
