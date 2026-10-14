@@ -19,6 +19,9 @@ DASHBOARD_INGEST_KEY = os.environ.get("DASHBOARD_INGEST_KEY", "").strip()
 HOME_ASSISTANT_WEBHOOK_URL = os.environ.get(
     "HOME_ASSISTANT_WEBHOOK_URL", ""
 ).strip()
+HOME_ASSISTANT_URL = os.environ.get("HOME_ASSISTANT_URL", "").strip().rstrip("/")
+HOME_ASSISTANT_TOKEN = os.environ.get("HOME_ASSISTANT_TOKEN", "").strip()
+NEST_MEDIA_PLAYER_ENTITY_ID = os.environ.get("NEST_MEDIA_PLAYER_ENTITY_ID", "").strip()
 
 DEFAULT_KEYWORDS = [
     word.strip().lower()
@@ -612,6 +615,119 @@ async def on_disconnect():
     await _update_status_channels()
 
 
+async def call_home_assistant(service_domain, service_name, data):
+    """Call a Home Assistant service using a long-lived access token."""
+    if not HOME_ASSISTANT_URL.startswith("https://") or not HOME_ASSISTANT_TOKEN:
+        return False, "Home Assistant API is not configured. Set HOME_ASSISTANT_URL and HOME_ASSISTANT_TOKEN in Railway."
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{HOME_ASSISTANT_URL}/api/services/{service_domain}/{service_name}",
+                headers={"Authorization": f"Bearer {HOME_ASSISTANT_TOKEN}", "Content-Type": "application/json"},
+                json=data,
+            ) as response:
+                if response.status in (200, 201):
+                    return True, "Home Assistant accepted the command."
+                return False, f"Home Assistant returned HTTP {response.status}. Check the service, token, and entity ID."
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return False, "Home Assistant API could not be reached. Check its HTTPS URL and network access."
+
+
+class NestVolumeModal(discord.ui.Modal, title="Set Nest volume"):
+    volume = discord.ui.TextInput(label="Volume (0 to 100)", placeholder="Example: 35", min_length=1, max_length=3, required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not NEST_MEDIA_PLAYER_ENTITY_ID:
+            return await interaction.response.send_message("Set NEST_MEDIA_PLAYER_ENTITY_ID in Railway first.", ephemeral=True)
+        try:
+            value = int(self.volume.value)
+            if value < 0 or value > 100:
+                raise ValueError()
+        except ValueError:
+            return await interaction.response.send_message("Enter a whole number from 0 to 100.", ephemeral=True)
+        ok, message = await call_home_assistant("media_player", "volume_set", {
+            "entity_id": NEST_MEDIA_PLAYER_ENTITY_ID, "volume_level": value / 100,
+        })
+        await interaction.response.send_message(("✅ " if ok else "⚠️ ") + message, ephemeral=True)
+
+
+class NestAnnouncementModal(discord.ui.Modal, title="Speak on Nest Hub"):
+    message = discord.ui.TextInput(label="Announcement text", style=discord.TextStyle.paragraph, max_length=220, required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not NEST_MEDIA_PLAYER_ENTITY_ID:
+            return await interaction.response.send_message("Set NEST_MEDIA_PLAYER_ENTITY_ID in Railway first.", ephemeral=True)
+        ok, result = await call_home_assistant("tts", "speak", {
+            "entity_id": "tts.google_translate_en_com",
+            "media_player_entity_id": NEST_MEDIA_PLAYER_ENTITY_ID,
+            "message": self.message.value,
+        })
+        await interaction.response.send_message(("✅ " if ok else "⚠️ ") + result, ephemeral=True)
+
+
+class NestAlarmModal(discord.ui.Modal, title="Set a Nest alarm"):
+    command = discord.ui.TextInput(
+        label="Alarm request",
+        placeholder="Example: Set an alarm for 7:00 AM tomorrow",
+        style=discord.TextStyle.paragraph, max_length=160, required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # This uses Home Assistant's Google Assistant SDK integration if installed.
+        # Google Assistant may apply the alarm to its configured/default device, not necessarily this Hub.
+        ok, result = await call_home_assistant("google_assistant_sdk", "send_text_command", {
+            "command": str(self.command.value).strip(),
+        })
+        if ok:
+            result += " Check the Nest Hub to confirm the alarm was created on the intended device; Assistant SDK may use its configured default device."
+        else:
+            result += " This requires the Google Assistant SDK integration in Home Assistant. If unavailable, set alarms by voice on the Nest Hub."
+        await interaction.response.send_message(("✅ " if ok else "⚠️ ") + result, ephemeral=True)
+
+
+class NestControlsView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    async def _media(self, interaction, service, data=None):
+        if not NEST_MEDIA_PLAYER_ENTITY_ID:
+            return await interaction.response.send_message("Set NEST_MEDIA_PLAYER_ENTITY_ID in Railway first (example: media_player.kitchen_display).", ephemeral=True)
+        payload = {"entity_id": NEST_MEDIA_PLAYER_ENTITY_ID}
+        if data:
+            payload.update(data)
+        ok, result = await call_home_assistant("media_player", service, payload)
+        await interaction.response.send_message(("✅ " if ok else "⚠️ ") + result, ephemeral=True)
+
+    @discord.ui.button(label="VOLUME −", style=discord.ButtonStyle.secondary, row=0, custom_id="socialwatch:nest:volume_down")
+    async def volume_down(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._media(interaction, "volume_down")
+
+    @discord.ui.button(label="VOLUME +", style=discord.ButtonStyle.secondary, row=0, custom_id="socialwatch:nest:volume_up")
+    async def volume_up(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._media(interaction, "volume_up")
+
+    @discord.ui.button(label="MUTE", style=discord.ButtonStyle.secondary, row=0, custom_id="socialwatch:nest:mute")
+    async def mute(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._media(interaction, "volume_mute", {"is_volume_muted": True})
+
+    @discord.ui.button(label="UNMUTE", style=discord.ButtonStyle.secondary, row=0, custom_id="socialwatch:nest:unmute")
+    async def unmute(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._media(interaction, "volume_mute", {"is_volume_muted": False})
+
+    @discord.ui.button(label="SET VOLUME", style=discord.ButtonStyle.primary, row=1, custom_id="socialwatch:nest:set_volume")
+    async def set_volume(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(NestVolumeModal())
+
+    @discord.ui.button(label="SPEAK MESSAGE", style=discord.ButtonStyle.primary, row=1, custom_id="socialwatch:nest:speak")
+    async def speak(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(NestAnnouncementModal())
+
+    @discord.ui.button(label="SET ALARM", style=discord.ButtonStyle.success, row=1, custom_id="socialwatch:nest:alarm")
+    async def alarm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(NestAlarmModal())
+
+
 class AnnouncementModal(discord.ui.Modal, title="Post an announcement"):
     announcement = discord.ui.TextInput(label="Announcement", style=discord.TextStyle.paragraph, max_length=1800, required=True)
 
@@ -779,28 +895,13 @@ class SocialWatchPanel(discord.ui.View):
             result += "\n\nEdit saved preferences in the dashboard: " + (DASHBOARD_URL or "dashboard URL not configured")
             return await interaction.response.send_message(result, ephemeral=True)
         if key == "nest-controls":
-            if not HOME_ASSISTANT_WEBHOOK_URL.startswith("https://"):
-                return await interaction.response.send_message("Nest test not sent: HOME_ASSISTANT_WEBHOOK_URL is missing or is not HTTPS in Railway. Configure the Home Assistant webhook first.", ephemeral=True)
-            if not AUTOMATION_SETTINGS.get("homeAssistantAnnouncementsEnabled", True):
-                return await interaction.response.send_message("Nest test not sent because Home Assistant announcements are currently disabled in the active settings.", ephemeral=True)
-            payload = {
-                "message": "Social Watch test notification. Your Home Assistant webhook received the test event.",
-                "source": "Social Watch Discord test",
-                "priority": "normal",
-                "keyword": "test",
-            }
-            try:
-                timeout = aiohttp.ClientTimeout(total=8)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(HOME_ASSISTANT_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"}) as response:
-                        if 200 <= response.status < 300:
-                            await post_integration_heartbeat("home_assistant", "connected")
-                            return await interaction.response.send_message("Test event accepted by the Home Assistant webhook. Check your Home Assistant automation and Nest Hub to confirm it announced.", ephemeral=True)
-                        await post_integration_heartbeat("home_assistant", "error")
-                        return await interaction.response.send_message("Home Assistant rejected the test event (HTTP " + str(response.status) + "). Check the webhook automation and Railway URL setting.", ephemeral=True)
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                await post_integration_heartbeat("home_assistant", "error")
-                return await interaction.response.send_message("Couldn't reach the Home Assistant webhook. Check the URL and that your Home Assistant endpoint is reachable over HTTPS.", ephemeral=True)
+            return await interaction.response.send_message(
+                "**Google Nest Hub controls**\nChoose a control below. Direct controls require the Home Assistant API, a long-lived access token, and your Nest media-player entity ID. Alarm creation additionally requires the Google Assistant SDK integration and may use its default device.\n\n"
+                + "Webhook test: " + ("configured" if HOME_ASSISTANT_WEBHOOK_URL.startswith("https://") else "not configured")
+                + "\nHome Assistant API: " + ("configured" if HOME_ASSISTANT_URL.startswith("https://") and HOME_ASSISTANT_TOKEN else "not configured")
+                + "\nNest entity: " + (NEST_MEDIA_PLAYER_ENTITY_ID or "not configured"),
+                view=NestControlsView(), ephemeral=True
+            )
         if key == "home-automations":
             settings = AUTOMATION_SETTINGS
             result = "**Home automation status**\nHome Assistant webhook: " + ("configured" if HOME_ASSISTANT_WEBHOOK_URL.startswith("https://") else "not configured")
