@@ -1147,16 +1147,19 @@ async def on_ready():
     print(f"Social Watch is online as {client.user}")
     await _ensure_control_channels()
 
-    # The user requested the rebuild directly; apply the additive, repeat-safe layout on startup.
+    # Never create channels in RacksArchive. Perform the approved one-time cleanup,
+    # then decorate only the channels that remain. The management server keeps its own layout.
     for server in client.guilds:
-        if bot_has_guild_permission(server, "manage_channels"):
-            try:
-                await _apply_server_layout(server)
-                await _ensure_channel_panels(server)
-            except discord.DiscordException as error:
-                print(f"Automatic server layout failed in {server.name}: {type(error).__name__}")
-        else:
-            print(f"Automatic server layout skipped in {server.name}: Manage Channels permission missing.")
+        try:
+            if server.id == 1552866429865558086:
+                await _cleanup_racksarchive_after_command_center(server)
+                await _decorate_racksarchive_existing_channels(server)
+            elif MANAGEMENT_GUILD_ID.isdigit() and server.id == int(MANAGEMENT_GUILD_ID):
+                if bot_has_guild_permission(server, "manage_channels"):
+                    await _apply_server_layout(server)
+                    await _ensure_channel_panels(server)
+        except discord.DiscordException as error:
+            print(f"Automatic channel update failed in {server.name}: {type(error).__name__}")
 
     try:
         # Sync slash commands directly to both the management server and the
@@ -1629,283 +1632,154 @@ async def socialwatch_racksarchive(interaction: discord.Interaction):
 
 
 
-@management_group.command(name="decorate-racksarchive", description="Add image guides, channel topics, and working navigation buttons")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(manage_channels=True, manage_guild=True)
-@app_commands.check(is_authorized_admin)
-async def socialwatch_decorate_racksarchive(interaction: discord.Interaction):
-    """Decorate only the approved RacksArchive server with helpful channel guides and links."""
-    target_guild_id = 1552866429865558086
-    guild = interaction.guild
-    if guild is None:
-        return await management_denied(interaction, "Run this command inside RacksArchive.")
-    if guild.id != target_guild_id:
-        return await management_denied(interaction, "Safety stop: this command only works in RacksArchive. Nothing was changed.")
-    if not bot_has_guild_permission(guild, "manage_channels"):
-        return await management_denied(interaction, "Social Watch needs Manage Channels permission.")
+RACKSARCHIVE_GUILD_ID = 1552866429865558086
+RACKSARCHIVE_CLEANUP_MARKER = "\u2063RA_CLEANUP_AFTER_COMMAND_CENTER_20261014\u2063"
+RACKSARCHIVE_GUIDE_MARKER = "RACKSARCHIVE_STUDIO_GUIDE_V3"
 
-    music_image = "https://images.unsplash.com/photo-1511379938547-c1f69419868d?auto=format&fit=crop&w=1200&q=85"
-    anime_image = "https://images.unsplash.com/photo-1578632767115-351597cf2477?auto=format&fit=crop&w=1200&q=85"
-    community_image = "https://images.unsplash.com/photo-1529156069898-49953e39b3ac?auto=format&fit=crop&w=1200&q=85"
-    music_hub = "🎛️・music-lab"
-    anime_hub = "⭐・anime-recommendations"
-    welcome_name = "👋・welcome-and-rules"
-    descriptions = {
-        "🎛️・music-lab": ("🎛️ MUSIC LAB", "Your production room for beats, sound design, DAWs, plugins, drum kits, arrangement, and mixing.", ["Post your DAW and what you're making", "Ask focused production questions", "Share tools you have permission to distribute"], "https://www.bandlab.com/", "Open BandLab"),
-        "🥁・beat-feedback": ("🥁 BEAT FEEDBACK", "Drop a beat and get useful feedback on bounce, drums, melodies, arrangement, and mix clarity.", ["Say what kind of feedback you want", "Give timestamps for specific moments", "Return feedback to other producers"], "https://www.youtube.com/", "Find beat references"),
-        "🎙️・recording-booth": ("🎙️ RECORDING BOOTH", "Talk recording setup, vocal takes, punch-ins, mic technique, mixing, mastering, and home-studio fixes.", ["Mention your mic and software when asking for help", "Share short clips only if you have permission", "Keep feedback constructive"], "https://www.audacityteam.org/", "Open Audacity"),
-        "🎧・song-drops": ("🎧 SONG DROPS", "Share finished songs, snippets, releases, and music you made or are authorized to share.", ["Add artist name and song title", "Include streaming links where possible", "No leaked or unauthorized uploads"], "https://soundcloud.com/", "Open SoundCloud"),
-        "🧑‍🎤・artist-profiles": ("🧑‍🎤 ARTIST PROFILES", "Introduce your sound, influences, releases, goals, and artist identity so the community can discover your work.", ["Use your artist name", "Link official profiles", "Keep promo relevant and avoid spam"], "https://artists.spotify.com/", "Spotify for Artists"),
-        "💿・beat-market": ("💿 BEAT MARKET", "Showcase original beats, discuss leases and exclusives, and connect over clear licensing terms.", ["State BPM and key if known", "Explain the license terms", "Only sell or share work you control"], "https://beatstars.com/", "Open BeatStars"),
-        "✍️・lyrics-and-writing": ("✍️ LYRICS & WRITING", "Workshop lyrics, hooks, concepts, rhyme schemes, storytelling, and song structure.", ["Mark the part you want help with", "Credit collaborators", "Don't repost private or unreleased lyrics without consent"], "https://genius.com/", "Explore song lyrics"),
-        "🤝・music-collabs": ("🤝 MUSIC COLLABS", "Find rappers, singers, producers, engineers, video editors, and people to build projects with.", ["Post your role and what you need", "Include a sample or portfolio", "Agree on credits, splits, and permissions first"], "https://discord.com/channels/" + str(guild.id), "Open Discord"),
-        "📦・racksarchive": ("📦 RACKSARCHIVE", "Keep an organized archive of releases, original beats, project notes, and authorized creative files.", ["Use clear artist-title-version names", "Include dates and credits", "Do not upload copyrighted or private material without permission"], "https://bandcamp.com/", "Open Bandcamp"),
-        "🎬・music-videos": ("🎬 MUSIC VIDEOS", "Share official music videos, visualizers, edits, and visual concepts you own or have permission to post.", ["Include the artist and track name", "Prefer official video links", "Credit visual artists and editors"], "https://www.youtube.com/", "Open YouTube"),
-        "⭐・anime-recommendations": ("⭐ ANIME RECOMMENDATIONS", "Find your next show by genre, mood, length, pacing, and what platforms have it.", ["Include genres you like or dislike", "Say if you want dubbed or subbed", "Use spoiler-free descriptions"], "https://myanimelist.net/", "Open MyAnimeList"),
-        "📅・seasonal-anime": ("📅 SEASONAL ANIME", "Discuss currently airing shows, release schedules, first impressions, and upcoming seasons.", ["Name the season and episode", "Keep major spoilers in the spoiler channel", "Mark speculation as speculation"], "https://anilist.co/", "Open AniList"),
-        "🎬・trailers-and-clips": ("🎬 TRAILERS & CLIPS", "Share official trailers, teasers, short clips, and previews from legitimate sources.", ["Prefer studio or distributor uploads", "Label the series and episode when relevant", "Avoid full episode reuploads"], "https://www.youtube.com/", "Find official trailers"),
-        "🔗・where-to-watch": ("🔗 WHERE TO WATCH", "Help people find official streaming options and legal viewing links for anime in their region.", ["Mention your country or region", "Check whether the link is official", "Availability changes by location"], "https://www.justwatch.com/", "Search streaming options"),
-        "🍿・watch-party-events": ("🍿 WATCH PARTY EVENTS", "Plan community watch sessions, pick a show, set a time, and coordinate episode discussions.", ["Post the show and episode", "Include time zone and start time", "Use official viewing options; don't restream copyrighted episodes"], "https://www.crunchyroll.com/", "Open Crunchyroll"),
-        "📺・watchlists": ("📺 WATCHLISTS", "Track what you're watching, what you finished, and what you want to start next.", ["Use Watching / Completed / Plan to Watch", "Add a quick rating or note", "Recommend something similar"], "https://anilist.co/", "Manage an AniList"),
-        "💬・anime-discussion": ("💬 ANIME DISCUSSION", "Talk characters, animation, studios, themes, theories, and favorite moments without spoiling other viewers.", ["Add spoiler tags for plot details", "Mention series and episode", "Debate ideas respectfully"], "https://myanimelist.net/", "Browse anime"),
-        "🗯️・episode-reactions": ("🗯️ EPISODE REACTIONS", "React to new episodes and share first impressions while helping people avoid accidental spoilers.", ["Put series and episode number first", "Use Discord spoiler formatting for reveals", "Don't spoil episodes ahead of the channel's discussion"], "https://www.crunchyroll.com/", "Open Crunchyroll"),
-        "🚨・spoilers": ("🚨 SPOILERS", "Major plot twists, endings, manga reveals, and future-episode spoilers belong here.", ["Name the series before the spoiler", "Wrap text in ||spoiler tags||", "Respect people who are not caught up"], "https://anilist.co/", "Track your progress"),
-        "📚・manga-corner": ("📚 MANGA CORNER", "Discuss manga chapters, adaptations, theories, art, and reading recommendations.", ["State the series and chapter", "Mark chapter spoilers clearly", "Share official publisher or store links"], "https://mangaplus.shueisha.co.jp/", "Read official manga"),
-        "👋・welcome-and-rules": ("👋 WELCOME TO RACKSARCHIVE", "Welcome to the hub for music creation, artist discovery, anime recommendations, and community events.", ["Be respectful and credit creators", "Keep posts in the right channels", "No spam, leaks, piracy links, or harassment"], "https://discord.com/safety", "Discord Safety"),
-        "📢・announcements": ("📢 ANNOUNCEMENTS", "Official RacksArchive updates, event notices, community news, and important changes.", ["Keep replies on topic", "Check event details and dates", "Staff announcements will be clearly labeled"], "https://discord.com/", "Discord"),
-        "💬・general-chat": ("💬 GENERAL CHAT", "The everyday lounge for introductions, conversations, questions, and community moments.", ["Keep it friendly", "Don't flood the chat", "Move detailed music or anime posts to their dedicated channels"], "https://discord.com/safety", "Community safety"),
-        "🤖・bot-commands": ("🤖 BOT COMMANDS", "Use slash commands and supported bot features here so other channels stay organized.", ["Type / to see available commands", "Follow each command's permission notes", "Never share passwords, tokens, or private keys"], "https://support.discord.com/", "Discord Help"),
-    }
-    # Include the voice rooms in the map so navigation buttons can point to them.
-    all_named_channels = {channel.name: channel for channel in guild.channels}
-    text_channels = [c for c in guild.text_channels if c.name in descriptions]
-    if not text_channels:
-        return await management_denied(interaction, "I couldn't find the planned RacksArchive channels. Run /socialwatch racksarchive first.")
+async def _cleanup_racksarchive_after_command_center(guild: discord.Guild):
+    """One-time, guild-locked deletion of channels shown after #command-center."""
+    if guild.id != RACKSARCHIVE_GUILD_ID or not bot_has_guild_permission(guild, "manage_channels"):
+        return
 
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    topics_updated = 0
-    guides_posted = 0
-    already_present = 0
-    issues = []
-    for channel in text_channels:
-        title, purpose, tips, resource_url, resource_label = descriptions[channel.name]
-        wanted_topic = purpose[:1024]
-        if channel.topic != wanted_topic:
-            try:
-                await channel.edit(topic=wanted_topic, reason="RacksArchive channel decoration and guide")
-                topics_updated += 1
-            except discord.HTTPException as error:
-                issues.append(f"{channel.name} topic: {type(error).__name__}")
+    command_center = discord.utils.get(guild.text_channels, name="command-center")
+    if command_center is None:
+        print("RacksArchive cleanup skipped: #command-center was not found.")
+        return
+    if RACKSARCHIVE_CLEANUP_MARKER in (command_center.topic or ""):
+        print("RacksArchive channel cleanup already completed; skipping.")
+        return
 
-        # Skip if this version's guide already exists so rerunning the command is safe.
-        found = False
-        try:
-            async for message in channel.history(limit=35):
-                if message.author == client.user and any(
-                    embed.footer and "RACKSARCHIVE_GUIDE_V1" in (embed.footer.text or "")
-                    for embed in message.embeds
-                ):
-                    found = True
-                    break
-        except discord.HTTPException:
-            pass
-        if found:
-            already_present += 1
-            continue
-
-        image_url = music_image if channel.name in {
-            "🎛️・music-lab", "🥁・beat-feedback", "🎙️・recording-booth", "🎧・song-drops",
-            "🧑‍🎤・artist-profiles", "💿・beat-market", "✍️・lyrics-and-writing",
-            "🤝・music-collabs", "📦・racksarchive", "🎬・music-videos"
-        } else anime_image if channel.name in {
-            "⭐・anime-recommendations", "📅・seasonal-anime", "🎬・trailers-and-clips",
-            "🔗・where-to-watch", "🍿・watch-party-events", "📺・watchlists",
-            "💬・anime-discussion", "🗯️・episode-reactions", "🚨・spoilers", "📚・manga-corner"
-        } else community_image
-
-        embed = discord.Embed(
-            title=title,
-            description=purpose + "\n\n**How to use this channel**\n" +
-                "\n".join(f"• {tip}" for tip in tips),
-            colour=discord.Colour.from_rgb(110, 72, 210),
-        )
-        embed.set_image(url=image_url)
-        embed.set_footer(text="RACKSARCHIVE_GUIDE_V1 • Respect creators • Keep it organized")
-        view = discord.ui.View(timeout=None)
-        main_name = music_hub if image_url == music_image else anime_hub if image_url == anime_image else "💬・general-chat"
-        main_channel = all_named_channels.get(main_name)
-        if main_channel:
-            view.add_item(discord.ui.Button(
-                label="Open Main Hub", emoji="🧭", style=discord.ButtonStyle.link,
-                url=f"https://discord.com/channels/{guild.id}/{main_channel.id}"
-            ))
-        view.add_item(discord.ui.Button(
-            label=resource_label[:80], emoji="🔗", style=discord.ButtonStyle.link,
-            url=resource_url
-        ))
-        rules_channel = all_named_channels.get(welcome_name)
-        if rules_channel and channel.id != rules_channel.id:
-            view.add_item(discord.ui.Button(
-                label="Welcome & Rules", emoji="📜", style=discord.ButtonStyle.link,
-                url=f"https://discord.com/channels/{guild.id}/{rules_channel.id}"
-            ))
-        try:
-            await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
-            guides_posted += 1
-        except discord.HTTPException as error:
-            issues.append(f"{channel.name} guide: {type(error).__name__}")
-
-    # Add a dedicated navigation panel in the welcome channel with links to the main areas.
-    welcome = all_named_channels.get(welcome_name)
-    if welcome:
-        found_panel = False
-        try:
-            async for message in welcome.history(limit=35):
-                if message.author == client.user and any(
-                    embed.footer and "RACKSARCHIVE_NAV_PANEL_V1" in (embed.footer.text or "")
-                    for embed in message.embeds
-                ):
-                    found_panel = True
-                    break
-        except discord.HTTPException:
-            pass
-        if not found_panel:
-            panel = discord.Embed(
-                title="✨ RACKSARCHIVE • PICK YOUR LANE",
-                description="Create music, discover artists, find anime, and build with the community. Use the buttons below to jump straight into each section.",
-                colour=discord.Colour.from_rgb(110, 72, 210),
-            )
-            panel.set_image(url=community_image)
-            panel.set_footer(text="RACKSARCHIVE_NAV_PANEL_V1 • Music • Anime • Community")
-            nav = discord.ui.View(timeout=None)
-            for label, channel_name, emoji in [
-                ("Music Lab", music_hub, "🎵"),
-                ("Song Drops", "🎧・song-drops", "🎧"),
-                ("Anime Picks", anime_hub, "📺"),
-                ("Watch Parties", "🍿・watch-party-events", "🍿"),
-                ("General Chat", "💬・general-chat", "💬"),
-            ]:
-                target = all_named_channels.get(channel_name)
-                if target:
-                    nav.add_item(discord.ui.Button(
-                        label=label, emoji=emoji, style=discord.ButtonStyle.link,
-                        url=f"https://discord.com/channels/{guild.id}/{target.id}"
-                    ))
-            try:
-                await welcome.send(embed=panel, view=nav, allowed_mentions=discord.AllowedMentions.none())
-                guides_posted += 1
-            except discord.HTTPException as error:
-                issues.append(f"welcome navigation: {type(error).__name__}")
-
-    result = (
-        "**RacksArchive decoration finished**\n"
-        f"Channel topics updated: {topics_updated}\n"
-        f"Image guides posted: {guides_posted}\n"
-        f"Guides already present: {already_present}\n"
-        "Added category artwork, channel-specific instructions, and clickable links to the correct Discord channels and official resources. Existing conversations and roles were not deleted."
-    )
-    if issues:
-        result += "\nIssues: " + "; ".join(issues[:8])
-    await interaction.followup.send(result[:1900], ephemeral=True)
-
-
-
-@management_group.command(name="reset-racksarchive", description="Replace old channels with the planned RacksArchive layout")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(manage_channels=True, manage_guild=True)
-@app_commands.check(is_authorized_admin)
-async def socialwatch_reset_racksarchive(interaction: discord.Interaction):
-    """Reset channels only in the specifically approved RacksArchive server; preserve roles and members."""
-    target_guild_id = 1552866429865558086
-    guild = interaction.guild
-    if guild is None:
-        return await management_denied(interaction, "Run this inside the new RacksArchive server.")
-    if guild.id != target_guild_id:
-        return await management_denied(interaction, "Safety stop: this command only works in the approved RacksArchive server. Nothing was changed.")
-    if not bot_has_guild_permission(guild, "manage_channels"):
-        return await management_denied(interaction, "The bot needs Manage Channels permission.")
-
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    deleted = 0
-    issues = []
-    # Delete only channels/categories in the approved guild. Do not delete roles, members, or server settings.
-    for channel in list(guild.channels):
+    def order_key(channel):
         if isinstance(channel, discord.CategoryChannel):
-            continue
+            return (channel.position, 0, channel.position)
+        if channel.category is not None:
+            return (channel.category.position, 1, channel.position)
+        return (channel.position, 1, channel.position)
+
+    ordered = sorted(guild.channels, key=order_key)
+    try:
+        cutoff = ordered.index(command_center)
+    except ValueError:
+        print("RacksArchive cleanup skipped: #command-center is not in the channel list.")
+        return
+
+    targets = ordered[cutoff + 1:]
+    failures = []
+    deleted = 0
+    # Reverse order removes child channels before their later categories.
+    for channel in reversed(targets):
         try:
-            await channel.delete(reason="User-confirmed RacksArchive-only channel reset")
+            await channel.delete(reason="User-confirmed RacksArchive cleanup: remove channels after #command-center")
             deleted += 1
         except discord.HTTPException as error:
-            issues.append(f"{channel.name}: {type(error).__name__}")
-    for category in list(guild.categories):
-        try:
-            await category.delete(reason="User-confirmed RacksArchive-only category reset")
-        except discord.HTTPException as error:
-            issues.append(f"{category.name}: {type(error).__name__}")
+            failures.append(f"{channel.name}: {type(error).__name__}")
 
-    layout = {
-        "🎵 RACKS MUSIC LAB": {
-            "🎛️・music-lab": "Create beats, discuss DAWs, plugins, drum kits, mixing, and production workflows.",
-            "🥁・beat-feedback": "Post beats and get feedback on drums, bounce, melodies, and mix.",
-            "🎙️・recording-booth": "Recording tips, vocals, punch-ins, mixing, and mastering.",
-            "🎧・song-drops": "Share finished songs, snippets, releases, and music videos you made or have permission to share.",
-            "🧑‍🎤・artist-profiles": "Artist profiles, inspirations, releases, and creative goals.",
-            "💿・beat-market": "Share original beats and discuss licensing and permissions.",
-            "✍️・lyrics-and-writing": "Write lyrics, exchange ideas, and workshop songs.",
-            "🤝・music-collabs": "Find producers, rappers, singers, engineers, and collaborators.",
-            "📦・racksarchive": "Organize released music, original beats, projects, and authorized archives.",
-            "🎬・music-videos": "Share music videos and visualizers you own or have permission to post.",
-            "🔊・beat-making-vc": None,
-        },
-        "📺 ANIME WORLD": {
-            "⭐・anime-recommendations": "Find anime by genre, mood, length, and streaming availability.",
-            "📅・seasonal-anime": "Discuss current-season shows and upcoming releases.",
-            "🎬・trailers-and-clips": "Official trailers and clips, or content you have permission to share.",
-            "🔗・where-to-watch": "Share official streaming services and legal episode links.",
-            "🍿・watch-party-events": "Coordinate watch parties and discuss viewing schedules.",
-            "📺・watchlists": "Keep personal watchlists and recommendations.",
-            "💬・anime-discussion": "Talk about series, characters, studios, and theories.",
-            "🗯️・episode-reactions": "React to episodes and new releases; use spoiler tags.",
-            "🚨・spoilers": "Major spoilers belong here.",
-            "📚・manga-corner": "Manga chapters, adaptations, theories, and reading recommendations.",
-            "📺・anime-watch-vc": None,
-        },
-        "🌐 RACKSARCHIVE COMMUNITY": {
-            "👋・welcome-and-rules": "Welcome to RacksArchive. Read the rules and introduce yourself.",
-            "📢・announcements": "RacksArchive community news, events, and updates.",
-            "💬・general-chat": "Everyday community chat.",
-            "🤖・bot-commands": "Use bot commands here to keep other channels focused.",
-        },
+    marker_topic = ((command_center.topic or "").strip() + " " + RACKSARCHIVE_CLEANUP_MARKER).strip()
+    try:
+        await command_center.edit(topic=marker_topic[:1024], reason="Mark the one-time RacksArchive cleanup complete")
+    except discord.HTTPException as error:
+        print(f"Could not mark RacksArchive cleanup complete: {type(error).__name__}")
+    print(f"RacksArchive cleanup deleted {deleted} later channels/categories; failures={len(failures)}.")
+    if failures:
+        print("RacksArchive cleanup issues: " + "; ".join(failures[:8]))
+
+
+async def _decorate_racksarchive_existing_channels(guild: discord.Guild):
+    """Post music-studio guide panels only in existing eligible RacksArchive text channels."""
+    if guild.id != RACKSARCHIVE_GUILD_ID:
+        return
+    me = guild.me
+    if me is None or not me.guild_permissions.manage_channels:
+        print("RacksArchive decoration skipped: Manage Channels permission missing.")
+        return
+
+    image_urls = [
+        "https://images.unsplash.com/photo-1598488035139-bdbb2231ce04?auto=format&fit=crop&w=1400&q=85",
+        "https://images.unsplash.com/photo-1511379938547-c1f69419868d?auto=format&fit=crop&w=1400&q=85",
+        "https://images.unsplash.com/photo-1590602847861-f357a9332bbc?auto=format&fit=crop&w=1400&q=85",
+        "https://images.unsplash.com/photo-1506157786151-b8491531f063?auto=format&fit=crop&w=1400&q=85",
+        "https://images.unsplash.com/photo-1524368535928-5b5e00ddc76b?auto=format&fit=crop&w=1400&q=85",
+    ]
+    guides = {
+        "music-lab": ("🎚️ Music Lab", "Build beats, arrange sounds, test drum patterns, and share works in progress. Post your BPM, key, reference track, and what feedback you want."),
+        "beat-feedback": ("🥁 Beat Feedback", "Give useful producer feedback: drums, bounce, mix clarity, arrangement, and what to improve. Be specific and respectful."),
+        "recording-booth": ("🎙️ Recording Booth", "Coordinate recording sessions, vocal takes, ad-libs, punch-ins, and mix notes. Label drafts with artist, song title, and version."),
+        "song-drops": ("💿 Song Drops", "Drop finished songs or previews with the artist name, title, credits, and streaming links. Keep feedback and promotion relevant."),
+        "artist-profiles": ("🎤 Artist Profiles", "Introduce your sound, influences, current projects, links, and what collaborators you need. Keep profile links up to date."),
+        "beat-market": ("🛒 Beat Market", "Share beats with clear BPM, key, lease/exclusive terms, producer credit, and contact method. Only offer rights you actually control."),
+        "lyrics-and-writing": ("✍️ Lyrics & Writing", "Work on hooks, verses, rhyme schemes, song concepts, and revisions. Credit co-writers and ask before reusing another person's work."),
+        "music-collabs": ("🤝 Music Collabs", "Find producers, artists, engineers, and video creators. Include your role, style, availability, and a safe way to contact you."),
+        "racksarchive": ("🗄️ RacksArchive", "Archive releases, cover art, credits, project versions, and reference links. Use consistent filenames and keep originals backed up."),
+        "music-videos": ("🎬 Music Videos", "Share official videos, visualizers, performance clips, and video concepts. Include creator credits and the official source link."),
+        "welcome-and-rules": ("🏁 Welcome to RacksArchive", "This is a music studio community for creating, recording, releasing, and archiving music. Respect members, credit creators, and keep posts in the right channel."),
+        "announcements": ("📢 Studio Announcements", "Post confirmed server updates, release news, studio events, and collaboration calls. Keep announcements clear and useful."),
+        "general-chat": ("💬 Studio Lounge", "Talk music, share discoveries, network, and plan projects. Keep conversations respectful and avoid spam."),
+        "bot-commands": ("🤖 Studio Tools", "Use the available bot tools here and follow each command's on-screen guidance. Never share tokens, passwords, private keys, or account recovery codes."),
     }
-    created_categories = 0
-    created_channels = 0
-    for category_name, channel_map in layout.items():
-        try:
-            category = await guild.create_category(category_name, reason="Rebuild planned RacksArchive layout")
-            created_categories += 1
-        except discord.HTTPException as error:
-            issues.append(f"{category_name}: {type(error).__name__}")
-            continue
-        for channel_name, topic in channel_map.items():
+    excluded_terms = ("anime", "manga", "spoiler", "watch-party", "watchlist", "seasonal-anime", "episode-reaction")
+    text_channels = [
+        ch for ch in guild.text_channels
+        if not any(term in ch.name.lower() for term in excluded_terms)
+        and ch.name not in ("audit-log", "system-status", "live-alerts")
+    ]
+    by_name = {ch.name.lower().replace("_", "-"): ch for ch in text_channels}
+    navigation = [
+        ("🎚️ Music Lab", "music-lab"),
+        ("🥁 Beat Feedback", "beat-feedback"),
+        ("🎙️ Recording Booth", "recording-booth"),
+        ("💿 Song Drops", "song-drops"),
+        ("🎤 Artist Profiles", "artist-profiles"),
+        ("💬 Studio Lounge", "general-chat"),
+    ]
+    topics_updated = 0
+    guides_posted = 0
+    for index, channel in enumerate(text_channels):
+        normalized = channel.name.lower().replace("_", "-")
+        matched = next(((key, value) for key, value in guides.items() if key in normalized), None)
+        title, description = matched[1] if matched else (
+            f"🎛️ {channel.name.replace('-', ' ').replace('_', ' ').title()}",
+            "Use this space for music creation, studio planning, release coordination, or archiving. Keep posts organized, credit creators, and include useful links or project details."
+        )
+        topic = description[:1024]
+        if channel.topic != topic:
             try:
-                if topic is None:
-                    await guild.create_voice_channel(channel_name, category=category, reason="Rebuild planned RacksArchive layout")
-                else:
-                    await guild.create_text_channel(channel_name, category=category, topic=topic, reason="Rebuild planned RacksArchive layout")
-                created_channels += 1
+                await channel.edit(topic=topic, reason="Add RacksArchive studio channel information")
+                topics_updated += 1
             except discord.HTTPException as error:
-                issues.append(f"{channel_name}: {type(error).__name__}")
+                print(f"Could not update topic for #{channel.name}: {type(error).__name__}")
 
-    result = (
-        "**RacksArchive reset complete**\\n"
-        f"Old channels deleted: {deleted}\\n"
-        f"Categories created: {created_categories}\\n"
-        f"New channels created: {created_channels}\\n"
-        "Roles, members, and server settings were preserved. This command is locked to the approved server ID."
-    )
-    if issues:
-        result += "\\nIssues: " + "; ".join(issues[:8])
-    await interaction.followup.send(result[:1900], ephemeral=True)
+        if not channel.permissions_for(me).send_messages or not channel.permissions_for(me).embed_links:
+            continue
+        try:
+            recent = [message async for message in channel.history(limit=35) if message.author.id == client.user.id]
+            if any(RACKSARCHIVE_GUIDE_MARKER in (embed.footer.text or "") for message in recent for embed in message.embeds):
+                continue
+        except discord.HTTPException:
+            recent = []
+
+        embed = discord.Embed(title=title, description=description, color=discord.Color.from_rgb(72, 84, 110))
+        embed.set_image(url=image_urls[index % len(image_urls)])
+        embed.set_footer(text=RACKSARCHIVE_GUIDE_MARKER)
+        view = discord.ui.View(timeout=None)
+        for label, target_name in navigation:
+            target = by_name.get(target_name)
+            if target is not None and target.id != channel.id:
+                view.add_item(discord.ui.Button(
+                    label=label, style=discord.ButtonStyle.link,
+                    url=f"https://discord.com/channels/{guild.id}/{target.id}"
+                ))
+        view.add_item(discord.ui.Button(
+            label="Music production resources", style=discord.ButtonStyle.link,
+            url="https://www.bandlab.com/"
+        ))
+        try:
+            await channel.send(embed=embed, view=view)
+            guides_posted += 1
+            await asyncio.sleep(0.4)
+        except discord.HTTPException as error:
+            print(f"Could not post guide in #{channel.name}: {type(error).__name__}")
+
+    print(f"RacksArchive studio decoration complete: topics={topics_updated}, guides={guides_posted}.")
 
 
 @management_group.command(name="delete-above-audit-log", description="Delete channels above audit-log and leave audit-log and below")
