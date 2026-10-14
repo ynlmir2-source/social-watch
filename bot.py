@@ -646,6 +646,7 @@ class KeywordTestModal(discord.ui.Modal, title="Test watched keywords"):
 
 PANEL_CONFIG = {
     "welcome": ("OPEN QUICK GUIDE", "Quick guide to Social Watch."),
+    "role-chooser": ("CHOOSE YOUR SETUP", "Choose House Functions or Phone Functions to show your matching section."),
     "announcements": ("POST ANNOUNCEMENT", "Open a form and publish an announcement here. Admin-only."),
     "system-status": ("CHECK SYSTEM STATUS", "Check whether the bot and dashboard are responding."),
     "live-alerts": ("TOGGLE LIVE ALERTS", "Pause or resume Discord alert delivery for this bot process."),
@@ -660,6 +661,44 @@ PANEL_CONFIG = {
 }
 
 
+class RoleChooserPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        house = discord.ui.Button(label="HOUSE FUNCTIONS", style=discord.ButtonStyle.success, custom_id="socialwatch:role:house")
+        phone = discord.ui.Button(label="PHONE FUNCTIONS", style=discord.ButtonStyle.primary, custom_id="socialwatch:role:phone")
+        house.callback = self.choose_house
+        phone.callback = self.choose_phone
+        self.add_item(house)
+        self.add_item(phone)
+
+    async def _assign(self, interaction: discord.Interaction, selected: str):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Use this button inside the Social Watch server.", ephemeral=True)
+        role_names = {"house": "House", "phone": "Phone"}
+        chosen = discord.utils.get(guild.roles, name=role_names[selected])
+        other = discord.utils.get(guild.roles, name=role_names["phone" if selected == "house" else "house"])
+        if chosen is None:
+            return await interaction.response.send_message("That role hasn't been created yet. Ask a server admin to check the bot's Manage Roles permission.", ephemeral=True)
+        try:
+            if other and other in interaction.user.roles:
+                await interaction.user.remove_roles(other, reason="Social Watch role chooser selection")
+            if chosen not in interaction.user.roles:
+                await interaction.user.add_roles(chosen, reason="Social Watch role chooser selection")
+        except discord.Forbidden:
+            return await interaction.response.send_message("I can't assign roles yet. An admin must give the bot Manage Roles and move its bot role above House and Phone.", ephemeral=True)
+        except discord.HTTPException:
+            return await interaction.response.send_message("Discord couldn't update your role. Try again in a moment.", ephemeral=True)
+        section = "House Functions" if selected == "house" else "Phone Functions"
+        return await interaction.response.send_message("You're set for **" + section + "**. That section should now appear in the channel list. You can return here and switch at any time.", ephemeral=True)
+
+    async def choose_house(self, interaction: discord.Interaction):
+        await self._assign(interaction, "house")
+
+    async def choose_phone(self, interaction: discord.Interaction):
+        await self._assign(interaction, "phone")
+
+
 class SocialWatchPanel(discord.ui.View):
     def __init__(self, panel_key: str):
         super().__init__(timeout=None)
@@ -672,6 +711,18 @@ class SocialWatchPanel(discord.ui.View):
     async def run_action(self, interaction: discord.Interaction):
         key = self.panel_key
         channel = interaction.channel
+        if key == "role-chooser":
+            return await interaction.response.send_message("Choose the section you want visible: **House Functions** for home/Nest/automation controls, or **Phone Functions** for social monitoring, keyword alerts, and phone notifications. Choosing one removes the other role; you can switch whenever you want.", ephemeral=True)
+        if key == "welcome":
+            guide = (
+                "**SOCIAL WATCH — QUICK START**\n\n"
+                "**1. Choose your section**\nUse the buttons in #role-chooser to show either House Functions or Phone Functions. You can switch later.\n\n"
+                "**2. Watched keywords**\nOpen the dashboard and add words or phrases in keyword settings. Choose priority and action, then save. Contains matches a phrase anywhere; whole word avoids matches inside larger words. Add exclusions to ignore messages containing certain phrases.\n\n"
+                "**3. Alerts**\nMatching messages are recorded in dashboard history. Depending on each rule's action, alerts may go to Discord, Google Nest through Home Assistant, or both. Record-only rules save matches without sending those alerts.\n\n"
+                "**4. Channel buttons**\nUse each pinned channel button for its matching action. Check #system-status and #integration-status if something isn't working.\n\n"
+                "**Important:** keep the bot running on Railway and never share bot tokens or webhook secrets."
+            )
+            return await interaction.response.send_message(guide, ephemeral=True)
         if key == "announcements":
             if str(interaction.user.id) not in ADMIN_USER_IDS:
                 return await interaction.response.send_message("Only an allowlisted Social Watch admin can post announcements.", ephemeral=True)
@@ -737,7 +788,7 @@ async def _ensure_channel_panels(guild):
         channel = discord.utils.get(guild.text_channels, name=channel_name)
         if channel is None:
             continue
-        view = SocialWatchPanel(channel_name)
+        view = RoleChooserPanel() if channel_name == "role-chooser" else SocialWatchPanel(channel_name)
         client.add_view(view)
         marker = "SOCIAL_WATCH_PANEL:" + channel_name
         existing = None
@@ -771,10 +822,19 @@ async def _ensure_channel_panels(guild):
 
 async def _apply_server_layout(guild):
     """Idempotently add the Social Watch layout without deleting existing server assets."""
+    # Create selectable section roles first so category permissions can reference them.
+    for role_name, color_value in [("House", 0x39FF14), ("Phone", 0x20D840)]:
+        if discord.utils.get(guild.roles, name=role_name) is None:
+            try:
+                await guild.create_role(name=role_name, colour=discord.Colour(color_value), reason="Social Watch section chooser")
+            except discord.HTTPException as error:
+                print("Could not create " + role_name + " role: " + type(error).__name__)
     layout = {
-        "▰ COMMAND CENTER": ["welcome", "announcements", "system-status"],
+        "▰ COMMAND CENTER": ["welcome", "role-chooser", "announcements", "system-status"],
         "▰ SOCIAL MONITORING": ["live-alerts", "social-feed", "keyword-matches"],
         "▰ AUTOMATION": ["bot-commands", "automation-settings", "integration-status"],
+        "▰ HOUSE FUNCTIONS": ["house-dashboard", "house-notifications", "nest-controls", "home-automations"],
+        "▰ PHONE FUNCTIONS": ["phone-socials", "phone-notifications", "keyword-settings", "phone-automations"],
         "▰ SYSTEM LOGS": ["event-logs", "error-logs", "audit-log"],
     }
     made_categories = 0
@@ -785,6 +845,18 @@ async def _apply_server_layout(guild):
         if category is None:
             # discord.py expects a dict for overwrites; an empty dict means default permissions.
             overwrites = {}
+            if category_name in {"▰ HOUSE FUNCTIONS", "▰ PHONE FUNCTIONS"}:
+                selected_name = "House" if category_name == "▰ HOUSE FUNCTIONS" else "Phone"
+                selected_role = discord.utils.get(guild.roles, name=selected_name)
+                overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+                if selected_role:
+                    overwrites[selected_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+                for admin_role_name in ("Owner", "Administrator", "Automation"):
+                    admin_role = discord.utils.get(guild.roles, name=admin_role_name)
+                    if admin_role:
+                        overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+                if guild.me:
+                    overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
             if category_name == "▰ SYSTEM LOGS":
                 overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
                 if guild.me:
@@ -811,18 +883,42 @@ async def _apply_server_layout(guild):
             except discord.HTTPException as error:
                 issues.append(f"{category_name}: {type(error).__name__}")
                 continue
+        if category_name in {"▰ HOUSE FUNCTIONS", "▰ PHONE FUNCTIONS"}:
+            selected_name = "House" if category_name == "▰ HOUSE FUNCTIONS" else "Phone"
+            selected_role = discord.utils.get(guild.roles, name=selected_name)
+            overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
+            if selected_role:
+                overwrites[selected_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            for admin_role_name in ("Owner", "Administrator", "Automation"):
+                admin_role = discord.utils.get(guild.roles, name=admin_role_name)
+                if admin_role:
+                    overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            if guild.me:
+                overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            try:
+                await category.edit(overwrites=overwrites, reason="Apply Social Watch section role visibility")
+            except discord.HTTPException as error:
+                issues.append(f"{category_name} permissions: {type(error).__name__}")
         for channel_name in channel_names:
-            if discord.utils.find(
+            existing_channel = discord.utils.find(
                 lambda ch: ch.name == channel_name and ch.category_id == category.id,
                 guild.text_channels,
-            ):
+            )
+            if existing_channel:
                 continue
             try:
-                await guild.create_text_channel(
+                created_channel = await guild.create_text_channel(
                     channel_name, category=category,
                     topic="Social Watch black and neon-green control center.",
                     reason="Social Watch black and neon-green server rebuild"
                 )
+                if channel_name == "role-chooser":
+                    welcome_channel = discord.utils.find(
+                        lambda ch: ch.name == "welcome" and ch.category_id == category.id,
+                        guild.text_channels,
+                    )
+                    if welcome_channel:
+                        await created_channel.edit(position=welcome_channel.position + 1)
                 made_channels += 1
             except discord.HTTPException as error:
                 issues.append(f"{channel_name}: {type(error).__name__}")
