@@ -167,12 +167,15 @@ _log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
 logging.getLogger().addHandler(_log_handler)
 
 async def _ensure_control_channels():
+    """Create Social Watch control channels only in its explicitly configured home guild."""
     global _LOG_CHANNEL
-    if not client.guilds:
+    if not MANAGEMENT_GUILD_ID.isdigit():
+        builtins.print("Social Watch control-channel setup skipped: MANAGEMENT_GUILD_ID is not configured.")
         return
-    guild = client.get_guild(int(MANAGEMENT_GUILD_ID)) if MANAGEMENT_GUILD_ID.isdigit() else None
+    guild = client.get_guild(int(MANAGEMENT_GUILD_ID))
     if guild is None:
-        guild = client.guilds[0]
+        builtins.print("Social Watch control-channel setup skipped: configured management guild is not available to the bot.")
+        return
     existing_log = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
     if existing_log is None and bot_has_guild_permission(guild, "manage_channels"):
         overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
@@ -188,25 +191,33 @@ async def _ensure_control_channels():
             if member:
                 overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         try:
-            existing_log = await guild.create_text_channel(LOG_CHANNEL_NAME, overwrites=overwrites, reason="Social Watch central log channel", topic="Private system logs from Social Watch bot and integrations.")
+            existing_log = await guild.create_text_channel(
+                LOG_CHANNEL_NAME, overwrites=overwrites,
+                reason="Social Watch central log channel",
+                topic="Private system logs from Social Watch bot and integrations."
+            )
         except discord.DiscordException as error:
             builtins.print(f"Could not create the Social Watch log channel: {type(error).__name__}")
     _LOG_CHANNEL = existing_log
-    for server in client.guilds:
-        status_channel = next((channel for channel in server.voice_channels if channel.name.endswith(STATUS_CHANNEL_SUFFIX)), None)
-        if status_channel is None and bot_has_guild_permission(server, "manage_channels"):
-            try:
-                status_channel = await server.create_voice_channel("🟢" + STATUS_CHANNEL_SUFFIX, reason="Social Watch live service status", user_limit=0)
-            except discord.DiscordException as error:
-                builtins.print(f"Could not create status voice channel in {server.name}: {type(error).__name__}")
-        if status_channel is not None:
-            _STATUS_CHANNELS[server.id] = status_channel
+    status_channel = next((channel for channel in guild.voice_channels if channel.name.endswith(STATUS_CHANNEL_SUFFIX)), None)
+    if status_channel is None and bot_has_guild_permission(guild, "manage_channels"):
+        try:
+            status_channel = await guild.create_voice_channel(
+                "🟢" + STATUS_CHANNEL_SUFFIX,
+                reason="Social Watch live service status",
+                user_limit=0
+            )
+        except discord.DiscordException as error:
+            builtins.print(f"Could not create status voice channel in {guild.name}: {type(error).__name__}")
+    if status_channel is not None:
+        _STATUS_CHANNELS[guild.id] = status_channel
     await _update_status_channels()
     builtins.print(
         "Social Watch system logging ready: "
         + ("Discord log channel ID " + str(_LOG_CHANNEL.id) if _LOG_CHANNEL else "Discord log channel unavailable")
         + "; status voice channels=" + str(len(_STATUS_CHANNELS))
     )
+
 
 async def _update_status_channels():
     if not _STATUS_CHANNELS:
@@ -1508,30 +1519,35 @@ async def socialwatch_racksarchive(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     layout = {
-        "🎵 MUSIC STUDIO": {
-            "🎛️・music-lab": "Create beats, talk DAWs, plugins, drum kits, mixing, and production workflows.",
-            "🥁・beat-feedback": "Post beats and get constructive feedback on drums, bounce, melodies, and mix.",
-            "🎙️・recording-booth": "Recording tips, vocals, punch-ins, mixing, and mastering help.",
+        "🎵 RACKS MUSIC LAB": {
+            "🎛️・music-lab": "Create beats, discuss DAWs, plugins, drum kits, mixing, and production workflows.",
+            "🥁・beat-feedback": "Post beats and get feedback on drums, bounce, melodies, and mix.",
+            "🎙️・recording-booth": "Recording tips, vocals, punch-ins, mixing, and mastering.",
             "🎧・song-drops": "Share finished songs, snippets, releases, and music videos you made or have permission to share.",
-            "🧑‍🎤・artist-showcase": "Artist profiles, inspirations, releases, and creative goals.",
-            "💿・sample-packs": "Discuss royalty-free samples, drum kits, presets, and sound design resources.",
+            "🧑‍🎤・artist-profiles": "Artist profiles, inspirations, releases, and creative goals.",
+            "💿・beat-market": "Share original beats and discuss licensing and permissions.",
+            "✍️・lyrics-and-writing": "Write lyrics, exchange ideas, and workshop songs.",
             "🤝・music-collabs": "Find producers, rappers, singers, engineers, and collaborators.",
+            "📦・racksarchive": "Organize released music, original beats, projects, and authorized archives.",
+            "🎬・music-videos": "Share music videos and visualizers you own or have permission to post.",
         },
-        "📺 ANIME LOUNGE": {
-            "🍿・anime-watch-party": "Coordinate watch parties and discuss where to stream shows through official services.",
-            "🔗・official-watch-links": "Share legal streaming links, official trailers, and episode pages.",
-            "⭐・anime-recommendations": "Ask for and share anime recommendations by genre, mood, or length.",
-            "🎬・trailers-and-clips": "Post official trailers and clips, or content you have permission to share.",
-            "💬・episode-discussion": "Talk about episodes and characters; use spoiler tags for major reveals.",
-            "🚨・spoiler-zone": "Spoilers allowed here. Keep major spoilers inside this channel.",
+        "📺 ANIME WORLD": {
+            "⭐・anime-recommendations": "Find anime by genre, mood, length, and streaming availability.",
+            "📅・seasonal-anime": "Discuss current-season shows and upcoming releases.",
+            "🎬・trailers-and-clips": "Official trailers and clips, or content you have permission to share.",
+            "🔗・where-to-watch": "Share official streaming services and legal episode links.",
+            "🍿・watch-party-events": "Coordinate watch parties and discuss viewing schedules.",
+            "📺・watchlists": "Keep personal watchlists and recommendations.",
+            "💬・anime-discussion": "Talk about series, characters, studios, and theories.",
+            "🗯️・episode-reactions": "React to episodes and new releases; use spoiler tags.",
+            "🚨・spoilers": "Major spoilers belong here.",
             "📚・manga-corner": "Manga chapters, adaptations, theories, and reading recommendations.",
-            "🎮・anime-gaming": "Anime games, gaming clips, cosplay, fan art, and related culture.",
         },
         "🌐 RACKSARCHIVE COMMUNITY": {
-            "👋・welcome": "Start here: introduce yourself and choose whether you are here for music, anime, or both.",
-            "📢・announcements": "RacksArchive news, events, releases, and community updates.",
+            "👋・welcome-and-rules": "Welcome to RacksArchive. Read the rules and introduce yourself.",
+            "📢・announcements": "RacksArchive community news, events, and updates.",
             "💬・general-chat": "Everyday community chat.",
-            "🤖・bot-commands": "Use bot commands here so the other channels stay focused.",
+            "🤖・bot-commands": "Use bot commands here to keep other channels focused.",
         },
     }
 
