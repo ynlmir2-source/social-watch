@@ -1159,11 +1159,18 @@ async def on_ready():
             print(f"Automatic server layout skipped in {server.name}: Manage Channels permission missing.")
 
     try:
+        # Sync slash commands directly to both the management server and the
+        # specifically approved RacksArchive server so new guild-only commands
+        # appear immediately in both places.
+        sync_guild_ids = {1552866429865558086}
         if MANAGEMENT_GUILD_ID.isdigit():
-            target_guild = discord.Object(id=int(MANAGEMENT_GUILD_ID))
-            tree.copy_global_to(guild=target_guild)
-            synced = await tree.sync(guild=target_guild)
-            print(f"Synced {len(synced)} management commands to guild {MANAGEMENT_GUILD_ID}.")
+            sync_guild_ids.add(int(MANAGEMENT_GUILD_ID))
+        if sync_guild_ids:
+            for guild_id in sorted(sync_guild_ids):
+                target_guild = discord.Object(id=guild_id)
+                tree.copy_global_to(guild=target_guild)
+                synced = await tree.sync(guild=target_guild)
+                print(f"Synced {len(synced)} management commands to guild {guild_id}.")
         else:
             synced = await tree.sync()
             print(f"Synced {len(synced)} global management commands.")
