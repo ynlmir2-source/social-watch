@@ -167,56 +167,21 @@ _log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
 logging.getLogger().addHandler(_log_handler)
 
 async def _ensure_control_channels():
-    """Create Social Watch control channels only in its explicitly configured home guild."""
+    """Bind to existing control channels without creating new channels."""
     global _LOG_CHANNEL
     if not MANAGEMENT_GUILD_ID.isdigit():
-        builtins.print("Social Watch control-channel setup skipped: MANAGEMENT_GUILD_ID is not configured.")
+        builtins.print("Social Watch control-channel lookup skipped: MANAGEMENT_GUILD_ID is not configured.")
         return
     guild = client.get_guild(int(MANAGEMENT_GUILD_ID))
     if guild is None:
-        builtins.print("Social Watch control-channel setup skipped: configured management guild is not available to the bot.")
+        builtins.print("Social Watch control-channel lookup skipped: configured management guild is unavailable.")
         return
-    existing_log = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
-    if existing_log is None and bot_has_guild_permission(guild, "manage_channels"):
-        overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
-        if guild.me:
-            overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, embed_links=True)
-        for user_id in ADMIN_USER_IDS:
-            member = guild.get_member(int(user_id))
-            if member is None:
-                try:
-                    member = await guild.fetch_member(int(user_id))
-                except discord.DiscordException:
-                    member = None
-            if member:
-                overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        try:
-            existing_log = await guild.create_text_channel(
-                LOG_CHANNEL_NAME, overwrites=overwrites,
-                reason="Social Watch central log channel",
-                topic="Private system logs from Social Watch bot and integrations."
-            )
-        except discord.DiscordException as error:
-            builtins.print(f"Could not create the Social Watch log channel: {type(error).__name__}")
-    _LOG_CHANNEL = existing_log
+    _LOG_CHANNEL = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
     status_channel = next((channel for channel in guild.voice_channels if channel.name.endswith(STATUS_CHANNEL_SUFFIX)), None)
-    if status_channel is None and bot_has_guild_permission(guild, "manage_channels"):
-        try:
-            status_channel = await guild.create_voice_channel(
-                "🟢" + STATUS_CHANNEL_SUFFIX,
-                reason="Social Watch live service status",
-                user_limit=0
-            )
-        except discord.DiscordException as error:
-            builtins.print(f"Could not create status voice channel in {guild.name}: {type(error).__name__}")
     if status_channel is not None:
         _STATUS_CHANNELS[guild.id] = status_channel
     await _update_status_channels()
-    builtins.print(
-        "Social Watch system logging ready: "
-        + ("Discord log channel ID " + str(_LOG_CHANNEL.id) if _LOG_CHANNEL else "Discord log channel unavailable")
-        + "; status voice channels=" + str(len(_STATUS_CHANNELS))
-    )
+    builtins.print("Social Watch existing-channel lookup ready; no channels were created.")
 
 
 async def _update_status_channels():
@@ -1155,9 +1120,8 @@ async def on_ready():
                 await _cleanup_racksarchive_after_command_center(server)
                 await _decorate_racksarchive_existing_channels(server)
             elif MANAGEMENT_GUILD_ID.isdigit() and server.id == int(MANAGEMENT_GUILD_ID):
-                if bot_has_guild_permission(server, "manage_channels"):
-                    await _apply_server_layout(server)
-                    await _ensure_channel_panels(server)
+                # Update information in existing channels only; never create categories or channels.
+                await _ensure_channel_panels(server)
         except discord.DiscordException as error:
             print(f"Automatic channel update failed in {server.name}: {type(error).__name__}")
 
