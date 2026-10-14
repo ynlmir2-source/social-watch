@@ -1674,11 +1674,12 @@ async def _cleanup_racksarchive_after_command_center(guild: discord.Guild):
         except discord.HTTPException as error:
             failures.append(f"{channel.name}: {type(error).__name__}")
 
-    marker_topic = ((command_center.topic or "").strip() + " " + RACKSARCHIVE_CLEANUP_MARKER).strip()
-    try:
-        await command_center.edit(topic=marker_topic[:1024], reason="Mark the one-time RacksArchive cleanup complete")
-    except discord.HTTPException as error:
-        print(f"Could not mark RacksArchive cleanup complete: {type(error).__name__}")
+    if not failures:
+        marker_topic = ((command_center.topic or "").replace(RACKSARCHIVE_CLEANUP_MARKER, "").strip() + " " + RACKSARCHIVE_CLEANUP_MARKER).strip()
+        try:
+            await command_center.edit(topic=marker_topic[:1024], reason="Mark the one-time RacksArchive cleanup complete")
+        except discord.HTTPException as error:
+            print(f"Could not mark RacksArchive cleanup complete: {type(error).__name__}")
     print(f"RacksArchive cleanup deleted {deleted} later channels/categories; failures={len(failures)}.")
     if failures:
         print("RacksArchive cleanup issues: " + "; ".join(failures[:8]))
@@ -1741,6 +1742,8 @@ async def _decorate_racksarchive_existing_channels(guild: discord.Guild):
             "Use this space for music creation, studio planning, release coordination, or archiving. Keep posts organized, credit creators, and include useful links or project details."
         )
         topic = description[:1024]
+        if channel.name.lower() == "command-center":
+            topic = (topic[:900] + " " + RACKSARCHIVE_CLEANUP_MARKER)[:1024]
         if channel.topic != topic:
             try:
                 await channel.edit(topic=topic, reason="Add RacksArchive studio channel information")
