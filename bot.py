@@ -658,14 +658,14 @@ PANEL_CONFIG = {
     "event-logs": ("RECENT EVENTS", "Review recent messages in this channel. This is not a complete audit of every external event."),
     "error-logs": ("RECENT ERRORS", "Filter this channel for error-like messages. Check Railway logs for detailed deployment and runtime diagnostics."),
     "audit-log": ("RECORD PANEL USE", "Write a lightweight panel-use entry. This is not a tamper-proof security audit log."),
-    "house-dashboard": ("OPEN CHANNEL GUIDE", "HOUSE DASHBOARD: Home automation overview and setup notes. Connect and test integrations before allowing them to control devices."),
-    "house-notifications": ("OPEN CHANNEL GUIDE", "HOUSE NOTIFICATIONS: Home-related alert preferences and summaries. Configure Home Assistant before expecting announcements on your Nest Hub."),
-    "nest-controls": ("OPEN CHANNEL GUIDE", "NEST CONTROLS: Google Nest announcements run through Home Assistant. This channel does not control the display until the Home Assistant automation is configured."),
-    "home-automations": ("OPEN CHANNEL GUIDE", "HOME AUTOMATIONS: Document routines, triggers, conditions, and actions here. Test automations safely before enabling them."),
-    "phone-socials": ("OPEN CHANNEL GUIDE", "PHONE & SOCIALS: Track supported social integrations and connection status. Only connected sources can generate live monitoring events."),
-    "phone-notifications": ("OPEN CHANNEL GUIDE", "PHONE NOTIFICATIONS: Review notification routing and priorities. Do not post authentication codes or sensitive personal messages here."),
-    "keyword-settings": ("OPEN CHANNEL GUIDE", "KEYWORD SETTINGS: Manage watched words and phrases in the dashboard. Test contains vs whole-word matching, exclusions, priority, and routing."),
-    "phone-automations": ("OPEN CHANNEL GUIDE", "PHONE AUTOMATIONS: Document supported phone-related triggers and actions. iPhone app notifications alone do not automatically send message content to the cloud bot."),
+    "house-dashboard": ("CHECK HOME STATUS", "HOUSE DASHBOARD: Home automation overview and setup notes. Connect and test integrations before allowing them to control devices."),
+    "house-notifications": ("VIEW ALERT SETTINGS", "HOUSE NOTIFICATIONS: Home-related alert preferences and summaries. Configure Home Assistant before expecting announcements on your Nest Hub."),
+    "nest-controls": ("SEND TEST NEST ALERT", "NEST CONTROLS: Google Nest announcements run through Home Assistant. This channel does not control the display until the Home Assistant automation is configured."),
+    "home-automations": ("VIEW AUTOMATION STATUS", "HOME AUTOMATIONS: Document routines, triggers, conditions, and actions here. Test automations safely before enabling them."),
+    "phone-socials": ("CHECK SOCIAL SOURCES", "PHONE & SOCIALS: Track supported social integrations and connection status. Only connected sources can generate live monitoring events."),
+    "phone-notifications": ("VIEW PHONE ALERTS", "PHONE NOTIFICATIONS: Review notification routing and priorities. Do not post authentication codes or sensitive personal messages here."),
+    "keyword-settings": ("OPEN KEYWORD SETTINGS", "KEYWORD SETTINGS: Manage watched words and phrases in the dashboard. Test contains vs whole-word matching, exclusions, priority, and routing."),
+    "phone-automations": ("VIEW PHONE AUTOMATIONS", "PHONE AUTOMATIONS: Document supported phone-related triggers and actions. iPhone app notifications alone do not automatically send message content to the cloud bot."),
 }
 
 
@@ -755,6 +755,83 @@ class SocialWatchPanel(discord.ui.View):
                 result = "Bot: " + ("online" if client.is_ready() else "offline") + "\nDashboard: " + ("healthy" if dashboard_ok else "unreachable / not configured")
             else:
                 result = "Dashboard: " + ("reachable" if dashboard_ok else "unreachable / not configured") + "\nHome Assistant webhook: " + ("configured" if HOME_ASSISTANT_WEBHOOK_URL.startswith("https://") else "not configured")
+            return await interaction.response.send_message(result, ephemeral=True)
+        if key == "house-dashboard":
+            dashboard_ok = False
+            if DASHBOARD_URL.startswith("https://"):
+                try:
+                    timeout = aiohttp.ClientTimeout(total=4)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.get(DASHBOARD_URL + "/health") as response:
+                            dashboard_ok = response.status == 200
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    pass
+            result = "**Home status**\\nDashboard: " + ("online" if dashboard_ok else "unreachable")
+            result += "\\nHome Assistant webhook: " + ("configured" if HOME_ASSISTANT_WEBHOOK_URL.startswith("https://") else "not configured")
+            result += "\\n\\nDashboard: " + (DASHBOARD_URL or "DASHBOARD_URL is not set in Railway")
+            return await interaction.response.send_message(result, ephemeral=True)
+        if key == "house-notifications":
+            settings = AUTOMATION_SETTINGS
+            result = "**Home notification settings**\\nHome Assistant announcements: " + ("enabled" if settings.get("homeAssistantAnnouncementsEnabled", True) else "disabled")
+            result += "\\nNest announcement mode: " + str(settings.get("nestAnnouncementMode", "all"))
+            result += "\\nQuiet hours: " + ("enabled" if settings.get("quietHoursEnabled") else "disabled")
+            result += "\\nWindow: " + str(settings.get("quietHoursStart", "22:00")) + "–" + str(settings.get("quietHoursEnd", "07:00")) + " (" + str(settings.get("timezone", "America/New_York")) + ")"
+            result += "\\n\\nEdit saved preferences in the dashboard: " + (DASHBOARD_URL or "dashboard URL not configured")
+            return await interaction.response.send_message(result, ephemeral=True)
+        if key == "nest-controls":
+            if not HOME_ASSISTANT_WEBHOOK_URL.startswith("https://"):
+                return await interaction.response.send_message("Nest test not sent: HOME_ASSISTANT_WEBHOOK_URL is missing or is not HTTPS in Railway. Configure the Home Assistant webhook first.", ephemeral=True)
+            if not AUTOMATION_SETTINGS.get("homeAssistantAnnouncementsEnabled", True):
+                return await interaction.response.send_message("Nest test not sent because Home Assistant announcements are currently disabled in the active settings.", ephemeral=True)
+            payload = {
+                "message": "Social Watch test notification. Your Home Assistant webhook received the test event.",
+                "source": "Social Watch Discord test",
+                "priority": "normal",
+                "keyword": "test",
+            }
+            try:
+                timeout = aiohttp.ClientTimeout(total=8)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(HOME_ASSISTANT_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"}) as response:
+                        if 200 <= response.status < 300:
+                            await post_integration_heartbeat("home_assistant", "connected")
+                            return await interaction.response.send_message("Test event accepted by the Home Assistant webhook. Check your Home Assistant automation and Nest Hub to confirm it announced.", ephemeral=True)
+                        await post_integration_heartbeat("home_assistant", "error")
+                        return await interaction.response.send_message("Home Assistant rejected the test event (HTTP " + str(response.status) + "). Check the webhook automation and Railway URL setting.", ephemeral=True)
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                await post_integration_heartbeat("home_assistant", "error")
+                return await interaction.response.send_message("Couldn't reach the Home Assistant webhook. Check the URL and that your Home Assistant endpoint is reachable over HTTPS.", ephemeral=True)
+        if key == "home-automations":
+            settings = AUTOMATION_SETTINGS
+            result = "**Home automation status**\\nHome Assistant webhook: " + ("configured" if HOME_ASSISTANT_WEBHOOK_URL.startswith("https://") else "not configured")
+            result += "\\nAnnouncements: " + ("enabled" if settings.get("homeAssistantAnnouncementsEnabled", True) else "disabled")
+            result += "\\nNest mode: " + str(settings.get("nestAnnouncementMode", "all"))
+            result += "\\n\\nThe bot currently forwards qualifying keyword alerts. Device-control routines must be created and tested in Home Assistant separately."
+            result += "\\nDashboard: " + (DASHBOARD_URL or "not configured")
+            return await interaction.response.send_message(result, ephemeral=True)
+        if key == "phone-socials":
+            result = "**Connected monitoring source**\\nDiscord server messages: monitored for configured watched keywords where message content is accessible to the bot."
+            result += "\\nExternal social networks and TextNow: not automatically connected by this bot unless a supported integration has been configured."
+            result += "\\nDashboard: " + (DASHBOARD_URL or "not configured")
+            return await interaction.response.send_message(result, ephemeral=True)
+        if key == "phone-notifications":
+            settings = AUTOMATION_SETTINGS
+            result = "**Phone notification routing**\\nDiscord alerts: " + ("enabled" if settings.get("discordChannelAlertsEnabled", True) else "paused")
+            result += "\\nHome Assistant announcements: " + ("enabled" if settings.get("homeAssistantAnnouncementsEnabled", True) else "disabled")
+            result += "\\nNest mode: " + str(settings.get("nestAnnouncementMode", "all"))
+            result += "\\nKeyword matches are recorded in dashboard history when dashboard forwarding is configured."
+            result += "\\nDashboard: " + (DASHBOARD_URL or "not configured")
+            return await interaction.response.send_message(result, ephemeral=True)
+        if key == "keyword-settings":
+            result = "**Keyword settings**\\nActive in-memory rules: " + str(len(KEYWORD_RULES))
+            result += "\\nRules support contains or whole-word matching, exclusions, priority, and destination actions."
+            result += "\\nEdit and save your rules here: " + (DASHBOARD_URL or "DASHBOARD_URL is not set in Railway")
+            return await interaction.response.send_message(result, ephemeral=True)
+        if key == "phone-automations":
+            result = "**Phone automation status**\\nKeyword evaluation: active for accessible Discord messages."
+            result += "\\nDashboard forwarding: " + ("configured" if DASHBOARD_URL.startswith("https://") and DASHBOARD_INGEST_KEY else "not configured")
+            result += "\\nTextNow/iPhone SMS and calls: no direct event feed is configured in this bot."
+            result += "\\n\\nManage watched keywords and routing: " + (DASHBOARD_URL or "dashboard URL not configured")
             return await interaction.response.send_message(result, ephemeral=True)
         if key == "social-feed":
             return await interaction.response.send_message("Social Watch dashboard: " + (DASHBOARD_URL or "not configured in Railway"), ephemeral=True)
