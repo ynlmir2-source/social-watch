@@ -368,6 +368,35 @@ async def socialwatch_infrastructure(
 
 
 
+@management_group.command(name="status", description="Check Social Watch bot and dashboard health")
+@app_commands.guild_only()
+@app_commands.check(is_authorized_admin)
+async def socialwatch_status(interaction: discord.Interaction):
+    """Show integration health without exposing credentials or changing server settings."""
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    bot_state = "online" if client.is_ready() else "starting"
+    dashboard_state = "not configured"
+    if DASHBOARD_URL.startswith("https://") and DASHBOARD_INGEST_KEY:
+        try:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{DASHBOARD_URL}/health") as response:
+                    dashboard_state = "healthy" if response.status == 200 else f"HTTP {response.status}"
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            dashboard_state = f"unreachable ({type(error).__name__})"
+
+    nest_state = "configured" if HOME_ASSISTANT_WEBHOOK_URL.startswith("https://") else "not configured"
+    message = (
+        "**Social Watch health**\\n"
+        f"• Discord bot: {bot_state}\\n"
+        f"• Dashboard: {dashboard_state}\\n"
+        f"• Home Assistant / Nest webhook: {nest_state}\\n"
+        "This check is read-only; it does not change channels, settings, or infrastructure."
+    )
+    await interaction.followup.send(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+
 tree.add_command(management_group)
 
 
