@@ -70,8 +70,14 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 LOG_CHANNEL_NAME = "social-watch-logs"
+STUDIO_CATEGORY_NAME = "▰ ROBLOX STUDIO"
+STUDIO_LOG_CHANNEL_NAME = "studio-logs"
+STUDIO_COMMAND_CHANNEL_NAME = "studio-commands"
 STATUS_CHANNEL_SUFFIX = "・system-status"
 _LOG_CHANNEL = None
+_STUDIO_LOG_CHANNEL = None
+_STUDIO_COMMAND_CHANNEL = None
+_STUDIO_LOG_FORWARD_TASK = None
 _STATUS_CHANNELS = {}
 _LAST_LOG_ERROR_AT = 0.0
 
@@ -166,8 +172,77 @@ _log_handler.setLevel(logging.INFO)
 _log_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
 logging.getLogger().addHandler(_log_handler)
 
+async def _ensure_studio_channels(guild):
+    """Create the private Studio command and audit-log section in the management server only."""
+    global _STUDIO_LOG_CHANNEL, _STUDIO_COMMAND_CHANNEL
+    if not MANAGEMENT_GUILD_ID.isdigit() or guild.id != int(MANAGEMENT_GUILD_ID):
+        return
+
+    category = discord.utils.get(guild.categories, name=STUDIO_CATEGORY_NAME)
+    overwrites = dict(category.overwrites) if category is not None else {}
+    overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+    if guild.me is not None:
+        overwrites[guild.me] = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True
+        )
+    for user_id in sorted(ADMIN_USER_IDS):
+        member = guild.get_member(int(user_id))
+        if member is None:
+            try:
+                member = await guild.fetch_member(int(user_id))
+            except discord.DiscordException:
+                member = None
+        if member is not None:
+            overwrites[member] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True
+            )
+
+    try:
+        if category is None:
+            category = await guild.create_category(
+                STUDIO_CATEGORY_NAME,
+                overwrites=overwrites,
+                reason="Create private Florence RP Studio command and log section",
+            )
+        else:
+            await category.edit(
+                overwrites=overwrites,
+                reason="Keep Florence RP Studio controls limited to approved admins",
+            )
+
+        for channel_name, topic in (
+            (STUDIO_LOG_CHANNEL_NAME, "Roblox Studio edit and relay activity. Visible to the management allowlist."),
+            (STUDIO_COMMAND_CHANNEL_NAME, "Studio command requests and audit trail. Use the /studio action command."),
+        ):
+            channel = discord.utils.find(
+                lambda item: item.name == channel_name and item.category_id == category.id,
+                guild.text_channels,
+            )
+            if channel is None:
+                channel = await guild.create_text_channel(
+                    channel_name,
+                    category=category,
+                    topic=topic,
+                    reason="Create Florence RP Studio logging and command channel",
+                )
+            if channel_name == STUDIO_LOG_CHANNEL_NAME:
+                _STUDIO_LOG_CHANNEL = channel
+            else:
+                _STUDIO_COMMAND_CHANNEL = channel
+        builtins.print(
+            "Roblox Studio Discord section ready in management server "
+            + guild.name
+            + ": "
+            + STUDIO_LOG_CHANNEL_NAME
+            + ", "
+            + STUDIO_COMMAND_CHANNEL_NAME
+        )
+    except discord.DiscordException as error:
+        builtins.print("Could not create Roblox Studio Discord section: " + type(error).__name__)
+
+
 async def _ensure_control_channels():
-    """Bind to existing control channels without creating new channels."""
+    """Bind to management-server logs and ensure the private Studio section exists."""
     global _LOG_CHANNEL
     if not MANAGEMENT_GUILD_ID.isdigit():
         builtins.print("Social Watch control-channel lookup skipped: MANAGEMENT_GUILD_ID is not configured.")
@@ -180,8 +255,9 @@ async def _ensure_control_channels():
     status_channel = next((channel for channel in guild.voice_channels if channel.name.endswith(STATUS_CHANNEL_SUFFIX)), None)
     if status_channel is not None:
         _STATUS_CHANNELS[guild.id] = status_channel
+    await _ensure_studio_channels(guild)
     await _update_status_channels()
-    builtins.print("Social Watch existing-channel lookup ready; no channels were created.")
+    builtins.print("Social Watch management channels are ready.")
 
 
 async def _update_status_channels():
@@ -397,6 +473,117 @@ async def socialwatch_status(interaction: discord.Interaction):
     await interaction.followup.send(message, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
+
+async def is_management_guild(interaction: discord.Interaction) -> bool:
+    return (
+        interaction.guild_id is not None
+        and MANAGEMENT_GUILD_ID.isdigit()
+        and interaction.guild_id == int(MANAGEMENT_GUILD_ID)
+    )
+
+
+async def _studio_dashboard_request(method, route, payload=None):
+    if not DASHBOARD_URL.startswith("https://") or not DASHBOARD_INGEST_KEY:
+        raise RuntimeError("Studio command bridge is not configured.")
+    timeout = aiohttp.ClientTimeout(total=8)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.request(
+            method,
+            f"{DASHBOARD_URL}{route}",
+            headers={"Authorization": f"Bearer {DASHBOARD_INGEST_KEY}"},
+            json=payload,
+        ) as response:
+            data = await response.json(content_type=None)
+            if response.status >= 300:
+                raise RuntimeError(str(data.get("error") or f"HTTP {response.status}")[:180])
+            return data
+
+
+studio_group = app_commands.Group(
+    name="studio",
+    description="Restricted Florence RP Roblox Studio controls",
+)
+
+
+@studio_group.command(name="action", description="Queue a safe Roblox Studio action")
+@app_commands.describe(operation="Choose a read-only status check or a test-marker action")
+@app_commands.choices(operation=[
+    app_commands.Choice(name="Check Studio status", value="status"),
+    app_commands.Choice(name="Place test marker", value="place_test_marker"),
+    app_commands.Choice(name="Clear test markers", value="clear_test_markers"),
+])
+@app_commands.guild_only()
+@app_commands.check(is_management_guild)
+@app_commands.check(is_authorized_admin)
+async def studio_action(interaction: discord.Interaction, operation: app_commands.Choice[str]):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        relay = await _studio_dashboard_request("GET", "/api/studio/relay/status")
+        if operation.value == "status":
+            last_seen = relay.get("lastSeen")
+            result = "online" if relay.get("online") else "offline"
+            message = f"Roblox Studio relay: **{result}**"
+            if last_seen:
+                message += f" · last heartbeat {last_seen}"
+            await _post_log_to_dashboard(
+                "info",
+                f"Discord admin {interaction.user.id} checked Roblox Studio relay status: {result}.",
+                "roblox-studio-command",
+            )
+            if _STUDIO_COMMAND_CHANNEL is not None:
+                await _STUDIO_COMMAND_CHANNEL.send(
+                    f"Studio status checked by {interaction.user.mention}: **{result}**.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            return await interaction.followup.send(
+                message,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+        if not relay.get("online"):
+            await _post_log_to_dashboard(
+                "warning",
+                f"Discord admin {interaction.user.id} requested {operation.value}; Studio relay is offline.",
+                "roblox-studio-command",
+            )
+            return await interaction.followup.send(
+                "Studio relay is offline. Open Roblox Studio with the Florence RP Discord Bridge plugin loaded, then try again.",
+                ephemeral=True,
+            )
+
+        queued = await _studio_dashboard_request(
+            "POST",
+            "/api/studio/commands",
+            {
+                "operation": operation.value,
+                "requestedBy": str(interaction.user),
+                "requestedById": str(interaction.user.id),
+                "guildId": str(interaction.guild_id),
+            },
+        )
+        command = queued.get("command") or {}
+        command_id = str(command.get("id") or "unknown")
+        if _STUDIO_COMMAND_CHANNEL is not None:
+            await _STUDIO_COMMAND_CHANNEL.send(
+                f"Queued **{operation.name}** · request {command_id} · by {interaction.user.mention}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        await interaction.followup.send(
+            f"Queued **{operation.name}** for Roblox Studio. Request {command_id}; results will appear in #studio-logs.",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError, ValueError) as error:
+        builtins.print(f"Roblox Studio Discord action failed: {type(error).__name__}: {error}")
+        await interaction.followup.send(
+            "Studio action was not queued. Check the Roblox Studio logs in the management server.",
+            ephemeral=True,
+        )
+
+
+tree.add_command(studio_group)
+
 tree.add_command(management_group)
 
 
@@ -429,6 +616,39 @@ async def post_integration_heartbeat(service, status="connected"):
                     )
     except (aiohttp.ClientError, asyncio.TimeoutError) as error:
         print(f"Integration heartbeat unavailable: {type(error).__name__}")
+
+
+
+async def studio_log_forward_loop():
+    """Forward Studio audit records to the management server's private studio-logs channel."""
+    while not client.is_closed():
+        await asyncio.sleep(5)
+        if not client.is_ready() or _STUDIO_LOG_CHANNEL is None:
+            continue
+        if not DASHBOARD_URL.startswith("https://") or not DASHBOARD_INGEST_KEY:
+            continue
+        try:
+            data = await _studio_dashboard_request("GET", "/api/studio/logs/pending?limit=20")
+            pending = data.get("logs") or []
+            delivered_ids = []
+            for entry in pending:
+                label = str(entry.get("level", "info")).upper()
+                source = _safe_log_text(entry.get("source", "roblox-studio"))[:80]
+                stamp = entry.get("created_at") or ""
+                message = _safe_log_text(entry.get("message", ""))[:1450]
+                await _STUDIO_LOG_CHANNEL.send(
+                    f"**{label}** · {stamp} · {source}\n{message}",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                delivered_ids.append(str(entry.get("id")))
+            if delivered_ids:
+                await _studio_dashboard_request(
+                    "POST",
+                    "/api/studio/logs/ack",
+                    {"ids": delivered_ids},
+                )
+        except (aiohttp.ClientError, asyncio.TimeoutError, discord.DiscordException, RuntimeError, ValueError) as error:
+            builtins.print(f"Studio log forwarder waiting: {type(error).__name__}")
 
 
 async def refresh_dashboard_config():
@@ -1071,42 +1291,30 @@ async def _apply_server_layout(guild):
 
 @client.event
 async def on_ready():
-    global _CONFIG_SYNC_TASK
+    global _CONFIG_SYNC_TASK, _STUDIO_LOG_FORWARD_TASK
 
     print(f"Social Watch is online as {client.user}")
     await _ensure_control_channels()
 
-    # Never create channels in RacksArchive. Perform the approved one-time cleanup,
-    # then decorate only the channels that remain. The management server keeps its own layout.
+    # Build channels and panels only in the configured management server.
     for server in client.guilds:
+        if not MANAGEMENT_GUILD_ID.isdigit() or server.id != int(MANAGEMENT_GUILD_ID):
+            continue
         try:
-            if server.id == 1552866429865558086:
-                await _cleanup_racksarchive_after_command_center(server)
-                await _decorate_racksarchive_existing_channels(server)
-            elif MANAGEMENT_GUILD_ID.isdigit() and server.id == int(MANAGEMENT_GUILD_ID):
-                # Update information in existing channels only; never create categories or channels.
-                await _ensure_channel_panels(server)
+            await _ensure_channel_panels(server)
         except discord.DiscordException as error:
-            print(f"Automatic channel update failed in {server.name}: {type(error).__name__}")
+            print(f"Management-channel update failed in {server.name}: {type(error).__name__}")
 
     try:
-        # Sync slash commands directly to both the management server and the
-        # specifically approved RacksArchive server so new guild-only commands
-        # appear immediately in both places.
-        sync_guild_ids = {1552866429865558086}
         if MANAGEMENT_GUILD_ID.isdigit():
-            sync_guild_ids.add(int(MANAGEMENT_GUILD_ID))
-        if sync_guild_ids:
-            for guild_id in sorted(sync_guild_ids):
-                target_guild = discord.Object(id=guild_id)
-                tree.copy_global_to(guild=target_guild)
-                synced = await tree.sync(guild=target_guild)
-                print(f"Synced {len(synced)} management commands to guild {guild_id}.")
+            target_guild = discord.Object(id=int(MANAGEMENT_GUILD_ID))
+            tree.copy_global_to(guild=target_guild)
+            synced = await tree.sync(guild=target_guild)
+            print(f"Synced {len(synced)} management commands only to the configured management server.")
         else:
-            synced = await tree.sync()
-            print(f"Synced {len(synced)} global management commands.")
+            print("Slash-command sync skipped: MANAGEMENT_GUILD_ID is required; no server was changed.")
         if not ADMIN_USER_IDS:
-            print("WARNING: SOCIAL_WATCH_ADMIN_IDS is empty; management commands are locked to everyone.")
+            print("WARNING: SOCIAL_WATCH_ADMIN_IDS is empty; management commands will deny all users.")
     except discord.HTTPException as error:
         print(f"Could not sync management commands: {type(error).__name__}: {error}")
 
@@ -1114,6 +1322,8 @@ async def on_ready():
         print("Dashboard forwarding is configured.")
         await refresh_dashboard_config()
         await post_integration_heartbeat("discord_bot", "connected")
+        if _STUDIO_LOG_FORWARD_TASK is None or _STUDIO_LOG_FORWARD_TASK.done():
+            _STUDIO_LOG_FORWARD_TASK = asyncio.create_task(studio_log_forward_loop())
     else:
         print("Dashboard forwarding is not configured yet.")
 
